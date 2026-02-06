@@ -1,3 +1,12 @@
-export default function Page() {
-  return <h1>En construcción</h1>;
+import StockMovementsPage from "../_components/StockMovementsPage";
+
+export default function PurchasesPage() {
+  return (
+    <StockMovementsPage
+      movementType="purchase"
+      pageTitle="Compras"
+      pageSubtitle="Registra entradas de inventario por compra."
+      counterpartyLabel="Proveedor"
+    />
+  );
 }
