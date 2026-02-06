@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { supabaseBrowser } from "../../lib/supabaseBrowser";
+import { supabaseBrowser } from "../../../lib/supabaseBrowser";
 
 export default function DashboardLayout({
   children,
