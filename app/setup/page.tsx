@@ -41,7 +41,7 @@ export default function SetupPage() {
     setMsg("");
     const { data: userRes } = await supabase.auth.getUser();
     const user = userRes.user;
-    if (!user) return router.push("/login");
+    if (!user) return router.push("/view/login");
     if (!selectedStoreId) return setMsg("Selecciona una tienda.");
 
     const { error } = await supabase.from("store_memberships").insert({
@@ -52,7 +52,7 @@ export default function SetupPage() {
 
     if (error) return setMsg(error.message);
 
-    router.push("/dashboard");
+    router.push("/view/dashboard");
   };
 
   return (

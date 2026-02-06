@@ -14,7 +14,7 @@ export default function DashboardLayout({
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
-    router.push("/login");
+    router.push("/view/login");
   };
 
   return (
@@ -26,25 +26,25 @@ export default function DashboardLayout({
               Stock SaaS
             </span>
             <Link
-              href="/dashboard/products"
+              href="/view/dashboard/products"
               className="rounded-full px-3 py-1 transition hover:bg-indigo-50 hover:text-indigo-700"
             >
               Productos
             </Link>
             <Link
-              href="/dashboard/purchases"
+              href="/view/dashboard/purchases"
               className="rounded-full px-3 py-1 transition hover:bg-indigo-50 hover:text-indigo-700"
             >
               Compras
             </Link>
             <Link
-              href="/dashboard/sales"
+              href="/view/dashboard/sales"
               className="rounded-full px-3 py-1 transition hover:bg-indigo-50 hover:text-indigo-700"
             >
               Ventas
             </Link>
             <Link
-              href="/dashboard/stock"
+              href="/view/dashboard/stock"
               className="rounded-full px-3 py-1 transition hover:bg-indigo-50 hover:text-indigo-700"
             >
               Stock
