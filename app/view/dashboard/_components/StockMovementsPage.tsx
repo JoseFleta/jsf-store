@@ -1,7 +1,9 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import { DayPicker, type DateRange } from "react-day-picker";
+import "react-day-picker/dist/style.css";
 import { supabaseBrowser } from "../../../../lib/supabaseBrowser";
 
 type MovementType = "purchase" | "sale";
@@ -12,16 +14,6 @@ type StockMovementsPageProps = {
   movementType: MovementType;
   pageTitle: string;
   pageSubtitle: string;
-};
-
-type StoreRow = {
-  store_id: string;
-  stores: { name: string } | { name: string }[] | null;
-};
-
-type StoreOption = {
-  id: string;
-  name: string;
 };
 
 type ProductRow = {
@@ -44,11 +36,11 @@ type MovementRow = {
   unit_price: number;
   channel: string | null;
   occurred_on: string;
-  reference: string | null;
-  notes: string | null;
   created_at: string;
   products: ProductRow | ProductRow[] | null;
 };
+
+type MovementDbRow = Omit<MovementRow, "products">;
 
 type CsvMovementInput = {
   occurred_on: string;
@@ -56,9 +48,32 @@ type CsvMovementInput = {
   quantity: number;
   total_amount: number;
   channel: string | null;
-  reference: string | null;
-  notes: string | null;
 };
+
+const CACHE_VERSION = "v1";
+const MOVEMENT_ROWS_CACHE_PREFIX = `stock_movements_rows_${CACHE_VERSION}`;
+const PRODUCTS_META_CACHE_PREFIX = `stock_products_meta_${CACHE_VERSION}`;
+const ACTIVE_PRODUCTS_CACHE_PREFIX = `stock_active_products_${CACHE_VERSION}`;
+
+function readCache<T>(key: string): T | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(key);
+    if (!raw) return null;
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+function writeCache<T>(key: string, value: T): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Ignore storage errors and keep runtime behavior.
+  }
+}
 
 function getProductName(product: ProductRow | ProductRow[] | null): string {
   const p = Array.isArray(product) ? product[0] : product;
@@ -72,17 +87,17 @@ function getProductSku(product: ProductRow | ProductRow[] | null): string {
 }
 
 function getTypeLabel(type: ProductType | ProductTypeFilter): string {
-  if (type === "ropa") return "Ropa";
-  if (type === "maquetas") return "Maquetas";
-  if (type === "accesorios") return "Accesorios";
-  return "Todos";
+  if (type === "ropa") return "Apparel";
+  if (type === "maquetas") return "Models";
+  if (type === "accesorios") return "Accessories";
+  return "All";
 }
 
 function getSubtypeLabel(type: ProductTypeFilter): string {
-  if (type === "maquetas") return "Escala";
-  if (type === "ropa") return "Tipo de ropa";
-  if (type === "accesorios") return "Tipo de accesorio";
-  return "Detalle tipo";
+  if (type === "maquetas") return "Scale";
+  if (type === "ropa") return "Clothing type";
+  if (type === "accesorios") return "Accessory type";
+  return "Type detail";
 }
 
 function getProductType(product: ProductRow | ProductRow[] | null): ProductType | null {
@@ -103,7 +118,25 @@ function getProductSubtype(product: ProductRow | ProductRow[] | null, typeFilter
 }
 
 function toCurrency(value: number): string {
-  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value);
+  return new Intl.NumberFormat("en-IE", { style: "currency", currency: "EUR" }).format(value);
+}
+
+function escapeCsvValue(value: string | number | boolean | null | undefined): string {
+  const text = value == null ? "" : String(value);
+  if (/[",\r\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
+}
+
+function toIsoDate(value: Date): string {
+  return value.toISOString().slice(0, 10);
+}
+
+function formatRangeLabel(range: DateRange | undefined): string {
+  if (!range?.from && !range?.to) return "Select range";
+  const fmt = new Intl.DateTimeFormat("en-GB");
+  if (range.from && range.to) return `${fmt.format(range.from)} - ${fmt.format(range.to)}`;
+  if (range.from) return `${fmt.format(range.from)} - ...`;
+  return "...";
 }
 
 function parseDelimitedLine(line: string, delimiter: string): string[] {
@@ -143,7 +176,7 @@ function parseCsvMovements(text: string): { rows: CsvMovementInput[]; errors: st
     .filter((line) => line.length > 0);
 
   if (lines.length === 0) {
-    return { rows: [], errors: ["CSV vacio."] };
+    return { rows: [], errors: ["Empty CSV file."] };
   }
 
   const delimiter = lines[0].includes("\t") ? "\t" : lines[0].includes(";") ? ";" : ",";
@@ -160,15 +193,14 @@ function parseCsvMovements(text: string): { rows: CsvMovementInput[]; errors: st
       : header.indexOf("price");
   const channelIdx = header.indexOf("channel");
   const cpIdx = header.indexOf("counterparty");
-  const supplierIdx = header.indexOf("proveedor");
-  const channelAliasIdx = channelIdx >= 0 ? channelIdx : cpIdx >= 0 ? cpIdx : supplierIdx;
-  const refIdx = header.indexOf("reference");
-  const notesIdx = header.indexOf("notes");
+  const supplierIdx = header.indexOf("supplier");
+  const proveedorIdx = header.indexOf("proveedor");
+  const channelAliasIdx = channelIdx >= 0 ? channelIdx : cpIdx >= 0 ? cpIdx : supplierIdx >= 0 ? supplierIdx : proveedorIdx;
 
   if (dateIdx < 0 || skuIdx < 0 || qtyIdx < 0 || amountIdx < 0) {
     return {
       rows: [],
-      errors: ["El archivo debe incluir: date, sku, quantity, total_amount (acepta CSV o TSV)."],
+      errors: ["The file must include: date, sku, quantity, total_amount (CSV or TSV)."],
     };
   }
 
@@ -185,15 +217,15 @@ function parseCsvMovements(text: string): { rows: CsvMovementInput[]; errors: st
     const total_amount = Number(amountRaw);
 
     if (!occurred_on || !sku || !qtyRaw || !amountRaw) {
-      errors.push(`Fila ${i + 1}: date, sku, quantity y total_amount son obligatorios.`);
+      errors.push(`Row ${i + 1}: date, sku, quantity, and total_amount are required.`);
       continue;
     }
     if (!Number.isFinite(quantity) || quantity <= 0) {
-      errors.push(`Fila ${i + 1}: quantity debe ser mayor a 0.`);
+      errors.push(`Row ${i + 1}: quantity must be greater than 0.`);
       continue;
     }
     if (!Number.isFinite(total_amount) || total_amount < 0) {
-      errors.push(`Fila ${i + 1}: total_amount debe ser 0 o mayor.`);
+      errors.push(`Row ${i + 1}: total_amount must be 0 or greater.`);
       continue;
     }
 
@@ -203,8 +235,6 @@ function parseCsvMovements(text: string): { rows: CsvMovementInput[]; errors: st
       quantity,
       total_amount,
       channel: channelAliasIdx >= 0 ? (cols[channelAliasIdx] || "").trim() || null : null,
-      reference: refIdx >= 0 ? (cols[refIdx] || "").trim() || null : null,
-      notes: notesIdx >= 0 ? (cols[notesIdx] || "").trim() || null : null,
     });
   }
 
@@ -215,22 +245,26 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
   const { movementType, pageTitle, pageSubtitle } = props;
 
   const router = useRouter();
+  const searchParams = useSearchParams();
   const supabase = useMemo(() => supabaseBrowser(), []);
 
-  const [stores, setStores] = useState<StoreOption[]>([]);
   const [products, setProducts] = useState<ProductRow[]>([]);
-  const [selectedStoreId, setSelectedStoreId] = useState("");
+  const [productMeta, setProductMeta] = useState<ProductRow[]>([]);
+  const [selectedStoreId, setSelectedStoreId] = useState(searchParams.get("store") || "");
   const [rows, setRows] = useState<MovementRow[]>([]);
 
   const [occurredOn, setOccurredOn] = useState(() => new Date().toISOString().slice(0, 10));
   const [productId, setProductId] = useState("");
   const [quantity, setQuantity] = useState("");
   const [totalAmount, setTotalAmount] = useState("");
-  const [reference, setReference] = useState("");
   const [channel, setChannel] = useState("");
-  const [notes, setNotes] = useState("");
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
 
   const [search, setSearch] = useState("");
+  const [dateRange, setDateRange] = useState<DateRange | undefined>(undefined);
+  const [isDateRangeOpen, setIsDateRangeOpen] = useState(false);
+  const [channelFilter, setChannelFilter] = useState("all");
   const [productTypeFilter, setProductTypeFilter] = useState<ProductTypeFilter>("all");
   const [pageSize, setPageSize] = useState(10);
   const [page, setPage] = useState(1);
@@ -242,16 +276,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
   const [editQuantity, setEditQuantity] = useState("");
   const [editTotalAmount, setEditTotalAmount] = useState("");
   const [editChannel, setEditChannel] = useState("");
-  const [editReference, setEditReference] = useState("");
-  const [editNotes, setEditNotes] = useState("");
 
-  const [bulkOccurredOn, setBulkOccurredOn] = useState("");
-  const [bulkTotalAmount, setBulkTotalAmount] = useState("");
-  const [bulkChannel, setBulkChannel] = useState("");
-  const [bulkReference, setBulkReference] = useState("");
-  const [bulkNotes, setBulkNotes] = useState("");
-
-  const [loadingStores, setLoadingStores] = useState(true);
   const [loadingProducts, setLoadingProducts] = useState(false);
   const [loadingRows, setLoadingRows] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -261,43 +286,31 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
   const [msg, setMsg] = useState("");
   const [csvErrors, setCsvErrors] = useState<string[]>([]);
 
+  const rowsCacheKey = useMemo(
+    () => (selectedStoreId ? `${MOVEMENT_ROWS_CACHE_PREFIX}:${selectedStoreId}:${movementType}` : ""),
+    [selectedStoreId, movementType]
+  );
+  const metaCacheKey = useMemo(
+    () => (selectedStoreId ? `${PRODUCTS_META_CACHE_PREFIX}:${selectedStoreId}` : ""),
+    [selectedStoreId]
+  );
+  const activeProductsCacheKey = useMemo(
+    () => (selectedStoreId ? `${ACTIVE_PRODUCTS_CACHE_PREFIX}:${selectedStoreId}` : ""),
+    [selectedStoreId]
+  );
+
+  useEffect(() => {
+    setSelectedStoreId(searchParams.get("store") || "");
+  }, [searchParams]);
+
   useEffect(() => {
     let cancelled = false;
-
-    const loadStores = async () => {
+    const checkAuth = async () => {
       const { data: userRes } = await supabase.auth.getUser();
       if (cancelled) return;
-
-      if (!userRes.user) {
-        router.push("/view/login");
-        return;
-      }
-
-      const { data, error } = await supabase
-        .from("store_memberships")
-        .select("store_id, stores(name)")
-        .eq("user_id", userRes.user.id);
-
-      if (cancelled) return;
-
-      if (error) {
-        setMsg(error.message);
-        setLoadingStores(false);
-        return;
-      }
-
-      const options = (data as StoreRow[]).map((row) => {
-        const rel = row.stores;
-        const name = Array.isArray(rel) ? rel[0]?.name : rel?.name;
-        return { id: row.store_id, name: name || "Store" };
-      });
-
-      setStores(options);
-      setSelectedStoreId((prev) => prev || options[0]?.id || "");
-      setLoadingStores(false);
+      if (!userRes.user) router.push("/view/login");
     };
-
-    loadStores();
+    checkAuth();
     return () => {
       cancelled = true;
     };
@@ -306,10 +319,56 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
   useEffect(() => {
     let cancelled = false;
 
-    const loadProducts = async () => {
+    const loadProductMeta = async () => {
+      if (!selectedStoreId) {
+        setProductMeta([]);
+        return;
+      }
+
+      const cached = readCache<ProductRow[]>(metaCacheKey);
+      if (cached) {
+        setProductMeta(cached);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("products")
+        .select("id,sku,name,title,product_type,escala,clothing_type,accessory_type")
+        .eq("store_id", selectedStoreId);
+
+      if (cancelled) return;
+
+      if (error) {
+        setMsg(error.message);
+        setProductMeta([]);
+        return;
+      }
+
+      const nextMeta = (data ?? []) as ProductRow[];
+      setProductMeta(nextMeta);
+      writeCache(metaCacheKey, nextMeta);
+    };
+
+    loadProductMeta();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedStoreId, supabase, metaCacheKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadActiveProducts = async () => {
       if (!selectedStoreId) {
         setProducts([]);
         setProductId("");
+        return;
+      }
+
+      const cached = readCache<ProductRow[]>(activeProductsCacheKey);
+      if (cached) {
+        setProducts(cached);
+        setProductId((prev) => prev || cached[0]?.id || "");
         return;
       }
 
@@ -333,14 +392,31 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
       const list = (data ?? []) as ProductRow[];
       setProducts(list);
       setProductId((prev) => prev || list[0]?.id || "");
+      writeCache(activeProductsCacheKey, list);
       setLoadingProducts(false);
     };
 
-    loadProducts();
+    loadActiveProducts();
     return () => {
       cancelled = true;
     };
-  }, [selectedStoreId, supabase]);
+  }, [selectedStoreId, supabase, activeProductsCacheKey]);
+
+  const productIndex = useMemo(() => {
+    return new Map(productMeta.map((p) => [p.id, p]));
+  }, [productMeta]);
+
+  const hydrateRowsWithProducts = (rowsData: MovementDbRow[]): MovementRow[] => {
+    return rowsData.map((row) => ({
+      ...row,
+      products: productIndex.get(row.product_id) || null,
+    }));
+  };
+
+  const persistRows = (nextRows: MovementRow[]) => {
+    setRows(nextRows);
+    if (rowsCacheKey) writeCache(rowsCacheKey, nextRows);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -351,12 +427,16 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
         return;
       }
 
+      const cached = readCache<MovementRow[]>(rowsCacheKey);
+      if (cached) {
+        setRows(cached);
+        return;
+      }
+
       setLoadingRows(true);
       const { data, error } = await supabase
         .from("stock_movements")
-        .select(
-          "id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,reference,notes,created_at,products(id,sku,name,title,product_type,escala,clothing_type,accessory_type)"
-        )
+        .select("id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,created_at")
         .eq("store_id", selectedStoreId)
         .eq("movement_type", movementType)
         .order("occurred_on", { ascending: false })
@@ -371,7 +451,8 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
         return;
       }
 
-      setRows((data ?? []) as MovementRow[]);
+      const hydrated = hydrateRowsWithProducts((data ?? []) as MovementDbRow[]);
+      persistRows(hydrated);
       setLoadingRows(false);
     };
 
@@ -379,25 +460,37 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     return () => {
       cancelled = true;
     };
-  }, [selectedStoreId, movementType, supabase]);
+  }, [selectedStoreId, movementType, supabase, productIndex, rowsCacheKey]);
+
+  const channelOptions = useMemo(() => {
+    return Array.from(
+      new Set(
+        rows
+          .map((row) => (row.channel || "").trim())
+          .filter((value) => value.length > 0)
+      )
+    ).sort((a, b) => a.localeCompare(b));
+  }, [rows]);
 
   const filteredRows = useMemo(() => {
     const term = search.trim().toLowerCase();
-    if (!term) {
-      return rows.filter((row) => (productTypeFilter === "all" ? true : getProductType(row.products) === productTypeFilter));
-    }
+    const hasCompleteRange = Boolean(dateRange?.from && dateRange?.to);
+    const dateFrom = hasCompleteRange && dateRange?.from ? toIsoDate(dateRange.from) : "";
+    const dateTo = hasCompleteRange && dateRange?.to ? toIsoDate(dateRange.to) : "";
 
     return rows.filter((row) => {
       const sku = getProductSku(row.products).toLowerCase();
       const name = getProductName(row.products).toLowerCase();
       const ch = (row.channel || "").toLowerCase();
-      const ref = (row.reference || "").toLowerCase();
       const subtype = getProductSubtype(row.products, "all").toLowerCase();
       const type = getProductType(row.products);
       const typeMatch = productTypeFilter === "all" ? true : type === productTypeFilter;
-      return typeMatch && (sku.includes(term) || name.includes(term) || ch.includes(term) || ref.includes(term) || subtype.includes(term));
+      const channelMatch = channelFilter === "all" ? true : (row.channel || "").trim() === channelFilter;
+      const fromMatch = !dateFrom || row.occurred_on >= dateFrom;
+      const toMatch = !dateTo || row.occurred_on <= dateTo;
+      return typeMatch && channelMatch && fromMatch && toMatch && (sku.includes(term) || name.includes(term) || ch.includes(term) || subtype.includes(term));
     });
-  }, [rows, search, productTypeFilter]);
+  }, [rows, search, productTypeFilter, channelFilter, dateRange]);
 
   const filteredProducts = useMemo(() => {
     return products.filter((p) => (productTypeFilter === "all" ? true : p.product_type === productTypeFilter));
@@ -407,7 +500,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
 
   useEffect(() => {
     setPage(1);
-  }, [selectedStoreId, search, pageSize, productTypeFilter]);
+  }, [selectedStoreId, search, pageSize, productTypeFilter, dateRange, channelFilter]);
 
   useEffect(() => {
     if (filteredProducts.length === 0) {
@@ -474,12 +567,8 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
         unit_price: amount,
         channel: channel.trim() || null,
         occurred_on: occurredOn,
-        reference: reference.trim() || null,
-        notes: notes.trim() || null,
       })
-      .select(
-        "id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,reference,notes,created_at,products(id,sku,name,title,product_type,escala,clothing_type,accessory_type)"
-      )
+      .select("id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,created_at")
       .single();
     setSaving(false);
 
@@ -488,23 +577,23 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
       return;
     }
 
-    setRows((prev) => [data as MovementRow, ...prev]);
+    const newRow = hydrateRowsWithProducts([data as MovementDbRow])[0];
+    persistRows([newRow, ...rows]);
     setQuantity("");
     setTotalAmount("");
     setChannel("");
-    setReference("");
-    setNotes("");
+    setIsCreateModalOpen(false);
     setMsg(movementType === "purchase" ? "Purchase added." : "Sale added.");
   };
 
   const downloadCsvTemplate = () => {
     const sample = [
       movementType === "purchase"
-        ? "date,sku,quantity,total_amount,proveedor,reference,notes"
-        : "date,sku,quantity,total_amount,channel,reference,notes",
+        ? "date,sku,quantity,total_amount,supplier"
+        : "date,sku,quantity,total_amount,channel",
       movementType === "purchase"
-        ? "2026-02-06,AAS-TEST-001,10,255.00,Supplier XYZ,INV-1001,Initial stock"
-        : "2026-02-06,AAS-TEST-001,2,79.98,Mercado Libre,SO-2001,Online sale",
+        ? "2026-02-06,AAS-TEST-001,10,255.00,Supplier XYZ"
+        : "2026-02-06,AAS-TEST-001,2,79.98,Mercado Libre",
     ].join("\n");
 
     const blob = new Blob([sample], { type: "text/csv;charset=utf-8;" });
@@ -512,6 +601,32 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     const a = document.createElement("a");
     a.href = url;
     a.download = movementType === "purchase" ? "plantilla_compras.csv" : "plantilla_ventas.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadFilteredRowsCsv = () => {
+    const headers = ["date", "sku", "product", "type", "type_detail", "quantity", "total_amount", "channel"];
+    const lines = filteredRows.map((row) =>
+      [
+        row.occurred_on,
+        getProductSku(row.products),
+        getProductName(row.products),
+        getProductType(row.products) || "",
+        getProductSubtype(row.products, "all"),
+        Number(row.quantity || 0).toFixed(0),
+        Number(row.unit_price || 0),
+        row.channel || "",
+      ]
+        .map((value) => escapeCsvValue(value))
+        .join(","),
+    );
+    const csv = [headers.join(","), ...lines].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = movementType === "purchase" ? "purchases_export.csv" : "sales_export.csv";
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -535,7 +650,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     if (parsed.errors.length > 0) {
       setImporting(false);
       setCsvErrors(parsed.errors);
-      setMsg(`CSV invalido: ${parsed.errors.length} errores.`);
+      setMsg(`Invalid CSV: ${parsed.errors.length} error(s).`);
       e.target.value = "";
       return;
     }
@@ -552,7 +667,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
       .map((row, index) => {
         const product_id = skuToProductId.get(row.sku);
         if (!product_id) {
-          missingSkuErrors.push(`Fila ${index + 2}: sku no existe en la tienda (${row.sku}).`);
+          missingSkuErrors.push(`Row ${index + 2}: sku not found in this store (${row.sku}).`);
           return null;
         }
         return {
@@ -564,8 +679,6 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
           unit_price: row.total_amount,
           channel: row.channel,
           occurred_on: row.occurred_on,
-          reference: row.reference,
-          notes: row.notes,
         };
       })
       .filter((x): x is NonNullable<typeof x> => Boolean(x));
@@ -573,7 +686,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     if (missingSkuErrors.length > 0) {
       setImporting(false);
       setCsvErrors(missingSkuErrors);
-      setMsg(`CSV invalido: ${missingSkuErrors.length} SKU(s) no encontrados.`);
+      setMsg(`Invalid CSV: ${missingSkuErrors.length} SKU(s) not found.`);
       e.target.value = "";
       return;
     }
@@ -592,9 +705,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
 
     const { data, error } = await supabase
       .from("stock_movements")
-      .select(
-        "id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,reference,notes,created_at,products(id,sku,name,title,product_type,escala,clothing_type,accessory_type)"
-      )
+      .select("id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,created_at")
       .eq("store_id", selectedStoreId)
       .eq("movement_type", movementType)
       .order("occurred_on", { ascending: false })
@@ -608,8 +719,9 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
       return;
     }
 
-    setRows((data ?? []) as MovementRow[]);
+    persistRows(hydrateRowsWithProducts((data ?? []) as MovementDbRow[]));
     setMsg(`Import complete: ${payload.length} rows processed.`);
+    setIsImportModalOpen(false);
   };
 
   const toggleRowSelection = (rowId: string, checked: boolean) => {
@@ -635,8 +747,6 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     setEditQuantity(String(row.quantity));
     setEditTotalAmount(String(row.unit_price));
     setEditChannel(row.channel || "");
-    setEditReference(row.reference || "");
-    setEditNotes(row.notes || "");
     setMsg("");
   };
 
@@ -647,8 +757,6 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     setEditQuantity("");
     setEditTotalAmount("");
     setEditChannel("");
-    setEditReference("");
-    setEditNotes("");
   };
 
   const handleSaveRowEdit = async () => {
@@ -670,15 +778,11 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
         qty_change: movementType === "purchase" ? qty : -qty,
         unit_price: amount,
         channel: editChannel.trim() || null,
-        reference: editReference.trim() || null,
-        notes: editNotes.trim() || null,
       })
       .eq("id", editingRowId)
       .eq("store_id", selectedStoreId)
       .eq("movement_type", movementType)
-      .select(
-        "id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,reference,notes,created_at,products(id,sku,name,title,product_type,escala,clothing_type,accessory_type)"
-      )
+      .select("id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,created_at")
       .single();
     setSavingEdit(false);
 
@@ -687,7 +791,8 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
       return;
     }
 
-    setRows((prev) => prev.map((row) => (row.id === editingRowId ? (data as MovementRow) : row)));
+    const updated = hydrateRowsWithProducts([data as MovementDbRow])[0];
+    persistRows(rows.map((row) => (row.id === editingRowId ? updated : row)));
     cancelEditRow();
     setMsg("Record updated.");
   };
@@ -703,7 +808,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
       return;
     }
 
-    setRows((prev) => prev.filter((row) => row.id !== rowId));
+    persistRows(rows.filter((row) => row.id !== rowId));
     setSelectedRowIds((prev) => prev.filter((id) => id !== rowId));
     setMsg("Record deleted.");
   };
@@ -727,257 +832,149 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
       return;
     }
 
-    setRows((prev) => prev.filter((row) => !selectedRowIds.includes(row.id)));
+    persistRows(rows.filter((row) => !selectedRowIds.includes(row.id)));
     setSelectedRowIds([]);
     setMsg("Records deleted.");
-  };
-
-  const handleBulkEdit = async () => {
-    if (!selectedStoreId || selectedRowIds.length === 0) return;
-
-    const patch: Record<string, unknown> = {};
-    if (bulkOccurredOn.trim()) patch.occurred_on = bulkOccurredOn.trim();
-    if (bulkTotalAmount.trim()) {
-      const amount = Number(bulkTotalAmount);
-      if (!Number.isFinite(amount) || amount < 0) return setMsg("Total amount must be 0 or greater.");
-      patch.unit_price = amount;
-    }
-    if (bulkChannel.trim()) patch.channel = bulkChannel.trim();
-    if (bulkReference.trim()) patch.reference = bulkReference.trim();
-    if (bulkNotes.trim()) patch.notes = bulkNotes.trim();
-
-    if (Object.keys(patch).length === 0) {
-      setMsg("Fill at least one bulk field.");
-      return;
-    }
-
-    setBulkWorking(true);
-    const { error } = await supabase
-      .from("stock_movements")
-      .update(patch)
-      .eq("store_id", selectedStoreId)
-      .eq("movement_type", movementType)
-      .in("id", selectedRowIds);
-    setBulkWorking(false);
-
-    if (error) {
-      setMsg(error.message);
-      return;
-    }
-
-    setRows((prev) =>
-      prev.map((row) => {
-        if (!selectedRowIds.includes(row.id)) return row;
-        return {
-          ...row,
-          occurred_on: (patch.occurred_on as string | undefined) ?? row.occurred_on,
-          unit_price: (patch.unit_price as number | undefined) ?? row.unit_price,
-          channel: (patch.channel as string | undefined) ?? row.channel,
-          reference: (patch.reference as string | undefined) ?? row.reference,
-          notes: (patch.notes as string | undefined) ?? row.notes,
-        };
-      })
-    );
-
-    setBulkOccurredOn("");
-    setBulkTotalAmount("");
-    setBulkChannel("");
-    setBulkReference("");
-    setBulkNotes("");
-    setSelectedRowIds([]);
-    setMsg("Records updated.");
   };
 
   return (
     <section className="space-y-6">
       <header className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-        <h1 className="text-2xl font-semibold text-slate-900">{pageTitle}</h1>
-        <p className="mt-1 text-sm text-slate-500">{pageSubtitle}</p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-semibold text-slate-900">{pageTitle}</h1>
+            <p className="mt-1 text-sm text-slate-500">{pageSubtitle}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="rounded-full bg-slate-900 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:opacity-60"
+              onClick={() => setIsCreateModalOpen(true)}
+              disabled={!selectedStoreId || filteredProducts.length === 0}
+            >
+              Add new record
+            </button>
+            <button
+              type="button"
+              className="rounded-full border border-slate-300 bg-white px-5 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-400 disabled:opacity-60"
+              onClick={downloadFilteredRowsCsv}
+              disabled={!selectedStoreId || filteredRows.length === 0}
+            >
+              Export CSV
+            </button>
+            <button
+              type="button"
+              className="rounded-full border border-slate-300 bg-white px-5 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-400 disabled:opacity-60"
+              onClick={() => setIsImportModalOpen(true)}
+              disabled={!selectedStoreId}
+            >
+              Import CSV
+            </button>
+          </div>
+        </div>
 
-        <div className="mt-5 grid gap-4 md:grid-cols-5">
+        <div className="mt-5 grid gap-4 md:grid-cols-6">
           <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Records (filter)</p>
-            <p className="mt-1 text-xl font-semibold text-slate-900">{filteredRows.length}</p>
-          </div>
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Qty (filter)</p>
-            <p className="mt-1 text-xl font-semibold text-slate-900">{totals.qty.toFixed(2)}</p>
-          </div>
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Amount (filter)</p>
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+              {movementType === "sale" ? "Total sales" : "Total purchases"}
+            </p>
             <p className="mt-1 text-xl font-semibold text-slate-900">{toCurrency(totals.amount)}</p>
           </div>
           <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-            <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Store</label>
-            <select
-              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
-              value={selectedStoreId}
-              onChange={(e) => setSelectedStoreId(e.target.value)}
-              disabled={loadingStores || stores.length === 0}
-            >
-              {stores.map((store) => (
-                <option key={store.id} value={store.id}>
-                  {store.name}
-                </option>
-              ))}
-            </select>
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Quantity</p>
+            <p className="mt-1 text-xl font-semibold text-slate-900">{totals.qty.toFixed(0)}</p>
           </div>
           <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-            <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Product type</label>
+            <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Date range</label>
+            <div className="relative mt-2">
+              <button
+                type="button"
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-left text-sm text-slate-700"
+                onClick={() => setIsDateRangeOpen((prev) => !prev)}
+              >
+                {formatRangeLabel(dateRange)}
+              </button>
+              {isDateRangeOpen && (
+                <div className="absolute z-20 mt-2 rounded-2xl border border-slate-200 bg-white p-3 shadow-xl">
+                  <DayPicker
+                    mode="range"
+                    min={1}
+                    selected={dateRange}
+                    onSelect={(range) => {
+                      setDateRange(range);
+                      if (range?.from && range?.to) setIsDateRangeOpen(false);
+                    }}
+                  />
+                  <div className="mt-2 flex justify-between">
+                    <button
+                      type="button"
+                      className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700"
+                      onClick={() => setDateRange(undefined)}
+                    >
+                      Clear
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700"
+                      onClick={() => setIsDateRangeOpen(false)}
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Type</label>
             <select
               className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
               value={productTypeFilter}
               onChange={(e) => setProductTypeFilter(e.target.value as ProductTypeFilter)}
             >
-              <option value="all">Todos</option>
-              <option value="maquetas">Maquetas</option>
-              <option value="ropa">Ropa</option>
-              <option value="accesorios">Accesorios</option>
+              <option value="all">All</option>
+              <option value="maquetas">Models</option>
+              <option value="ropa">Apparel</option>
+              <option value="accesorios">Accessories</option>
+            </select>
+          </div>
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Search</label>
+            <input
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+              placeholder="SKU, product, channel"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Channel</label>
+            <select
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+              value={channelFilter}
+              onChange={(e) => setChannelFilter(e.target.value)}
+            >
+              <option value="all">All channels</option>
+              {channelOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
             </select>
           </div>
         </div>
       </header>
 
-      <div className="grid gap-6 lg:grid-cols-[380px_1fr]">
-        <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-          <h2 className="text-lg font-semibold text-slate-900">New record</h2>
-
-          <form className="mt-5 space-y-4" onSubmit={handleCreate}>
-            <div>
-              <label className="text-sm font-medium text-slate-700">Date</label>
-              <input
-                type="date"
-                className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm"
-                value={occurredOn}
-                onChange={(e) => setOccurredOn(e.target.value)}
-              />
-            </div>
-
-            <div>
-              <label className="text-sm font-medium text-slate-700">Product</label>
-              <select
-                className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm"
-                value={productId}
-                onChange={(e) => setProductId(e.target.value)}
-                disabled={loadingProducts || filteredProducts.length === 0}
-              >
-                {filteredProducts.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.sku} - {p.title || p.name || "Product"}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-sm font-medium text-slate-700">Quantity</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm"
-                  value={quantity}
-                  onChange={(e) => setQuantity(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="text-sm font-medium text-slate-700">Total amount</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm"
-                  value={totalAmount}
-                  onChange={(e) => setTotalAmount(e.target.value)}
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="text-sm font-medium text-slate-700">Channel</label>
-              <input
-                className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm"
-                value={channel}
-                onChange={(e) => setChannel(e.target.value)}
-                placeholder={movementType === "purchase" ? "Proveedor / canal" : "Marketplace / canal"}
-              />
-            </div>
-
-            <div>
-              <label className="text-sm font-medium text-slate-700">Reference</label>
-              <input
-                className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm"
-                value={reference}
-                onChange={(e) => setReference(e.target.value)}
-                placeholder="Invoice, receipt, order number"
-              />
-            </div>
-
-            <div>
-              <label className="text-sm font-medium text-slate-700">Notes</label>
-              <textarea
-                className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm"
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                rows={3}
-              />
-            </div>
-
-            <button
-              type="submit"
-              className="w-full rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:opacity-60"
-              disabled={saving || !selectedStoreId || !productId}
-            >
-              {saving ? "Saving..." : movementType === "purchase" ? "Add purchase" : "Add sale"}
-            </button>
-          </form>
-
-          <div className="mt-6 border-t border-slate-200 pt-5 space-y-3">
-            <div className="flex items-center justify-between gap-3">
-              <h3 className="text-sm font-semibold text-slate-900">Import CSV</h3>
-              <button
-                type="button"
-                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-indigo-200 hover:text-indigo-700"
-                onClick={downloadCsvTemplate}
-              >
-                Download template
-              </button>
-            </div>
-            <p className="text-xs text-slate-500">
-              {movementType === "purchase"
-                ? "Required columns: date, sku, quantity, total_amount. Optional: proveedor, reference, notes."
-                : "Required columns: date, sku, quantity, total_amount. Optional: channel, reference, notes."}
-            </p>
-            <input
-              className="block w-full text-sm text-slate-700 file:mr-3 file:rounded-full file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-slate-800"
-              type="file"
-              accept=".csv,text/csv"
-              onChange={handleImportCsv}
-              disabled={importing || !selectedStoreId}
-            />
-            {importing && <p className="text-xs text-slate-500">Importing...</p>}
-          </div>
-        </article>
-
-        <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+      <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
           <div className="flex items-end justify-between gap-3">
             <div>
-              <h2 className="text-lg font-semibold text-slate-900">History</h2>
+              <h2 className="text-lg font-semibold text-slate-900">{pageTitle}</h2>
               <p className="mt-1 text-sm text-slate-500">Date, SKU, product, quantity and price.</p>
             </div>
             <div className="flex items-end gap-3">
               <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
                 <p className="text-xs text-slate-500">{selectedRowIds.length} selected</p>
                 <div className="mt-1 flex gap-2">
-                  <button
-                    type="button"
-                    className="rounded-full border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 disabled:opacity-50"
-                    onClick={handleBulkEdit}
-                    disabled={selectedRowIds.length === 0 || bulkWorking}
-                  >
-                    Bulk edit
-                  </button>
                   <button
                     type="button"
                     className="rounded-full border border-rose-200 px-2 py-1 text-xs font-semibold text-rose-700 disabled:opacity-50"
@@ -987,15 +984,6 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
                     Delete
                   </button>
                 </div>
-              </div>
-              <div>
-                <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Search</label>
-                <input
-                  className="mt-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
-                  placeholder="SKU, product, channel, reference"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                />
               </div>
               <div>
                 <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Per page</label>
@@ -1010,50 +998,6 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
                 </select>
               </div>
             </div>
-          </div>
-
-          <div className="mt-4 grid gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 md:grid-cols-3">
-            <input
-              type="date"
-              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-              value={bulkOccurredOn}
-              onChange={(e) => setBulkOccurredOn(e.target.value)}
-              placeholder="Date"
-            />
-            <input
-              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-              value={bulkTotalAmount}
-              onChange={(e) => setBulkTotalAmount(e.target.value)}
-              placeholder="Total amount"
-            />
-            {movementType === "sale" ? (
-              <input
-                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                value={bulkChannel}
-                onChange={(e) => setBulkChannel(e.target.value)}
-                placeholder="Channel"
-              />
-            ) : (
-              <div />
-            )}
-            <input
-              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-              value={bulkChannel}
-              onChange={(e) => setBulkChannel(e.target.value)}
-              placeholder="Channel"
-            />
-            <input
-              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-              value={bulkReference}
-              onChange={(e) => setBulkReference(e.target.value)}
-              placeholder="Reference"
-            />
-            <input
-              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-              value={bulkNotes}
-              onChange={(e) => setBulkNotes(e.target.value)}
-              placeholder="Notes"
-            />
           </div>
 
           {loadingRows ? (
@@ -1083,8 +1027,6 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
                     <th className="px-2 py-3">Qty</th>
                     <th className="px-2 py-3">Total amount</th>
                     <th className="px-2 py-3">Channel</th>
-                    <th className="px-2 py-3">Reference</th>
-                    <th className="px-2 py-3">Notes</th>
                     <th className="px-2 py-3">Actions</th>
                   </tr>
                 </thead>
@@ -1146,7 +1088,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
                               onChange={(e) => setEditQuantity(e.target.value)}
                             />
                           ) : (
-                            qty.toFixed(2)
+                            qty.toFixed(0)
                           )}
                         </td>
                         <td className="px-2 py-3">
@@ -1172,28 +1114,6 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
                             />
                           ) : (
                             row.channel || "-"
-                          )}
-                        </td>
-                        <td className="px-2 py-3">
-                          {isEditing ? (
-                            <input
-                              className="w-28 rounded-lg border border-slate-200 px-2 py-1"
-                              value={editReference}
-                              onChange={(e) => setEditReference(e.target.value)}
-                            />
-                          ) : (
-                            row.reference || "-"
-                          )}
-                        </td>
-                        <td className="px-2 py-3">
-                          {isEditing ? (
-                            <input
-                              className="w-28 rounded-lg border border-slate-200 px-2 py-1"
-                              value={editNotes}
-                              onChange={(e) => setEditNotes(e.target.value)}
-                            />
-                          ) : (
-                            row.notes || "-"
                           )}
                         </td>
                         <td className="px-2 py-3">
@@ -1267,10 +1187,156 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
               </button>
             </div>
           </div>
-        </article>
-      </div>
+      </article>
 
       {msg && <p className="text-sm text-slate-600">{msg}</p>}
+
+      {isCreateModalOpen && (
+        <div
+          className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/40 p-4"
+          onClick={() => setIsCreateModalOpen(false)}
+        >
+          <article
+            className="mx-auto my-6 w-full max-w-xl max-h-[88vh] overflow-y-auto rounded-3xl border border-slate-200 bg-white p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900">Add new record</h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  {movementType === "purchase" ? "Complete purchase details." : "Complete sale details."}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700"
+                onClick={() => setIsCreateModalOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+
+            <form className="mt-5 space-y-4" onSubmit={handleCreate}>
+              <div>
+                <label className="text-sm font-medium text-slate-700">Date</label>
+                <input
+                  type="date"
+                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm"
+                  value={occurredOn}
+                  onChange={(e) => setOccurredOn(e.target.value)}
+                />
+              </div>
+
+              <div>
+                <label className="text-sm font-medium text-slate-700">Product</label>
+                <select
+                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm"
+                  value={productId}
+                  onChange={(e) => setProductId(e.target.value)}
+                  disabled={loadingProducts || filteredProducts.length === 0}
+                >
+                  {filteredProducts.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.sku} - {p.title || p.name || "Product"}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-sm font-medium text-slate-700">Quantity</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm"
+                    value={quantity}
+                    onChange={(e) => setQuantity(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-700">Total amount</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm"
+                    value={totalAmount}
+                    onChange={(e) => setTotalAmount(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-sm font-medium text-slate-700">{movementType === "purchase" ? "Supplier" : "Channel"}</label>
+                <input
+                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm"
+                  value={channel}
+                  onChange={(e) => setChannel(e.target.value)}
+                  placeholder={movementType === "purchase" ? "Supplier" : "Marketplace / channel"}
+                />
+              </div>
+
+              <button
+                type="submit"
+                className="w-full rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:opacity-60"
+                disabled={saving || !selectedStoreId || !productId}
+              >
+                {saving ? "Saving..." : movementType === "purchase" ? "Add purchase" : "Add sale"}
+              </button>
+            </form>
+          </article>
+        </div>
+      )}
+
+      {isImportModalOpen && (
+        <div
+          className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/40 p-4"
+          onClick={() => setIsImportModalOpen(false)}
+        >
+          <article
+            className="mx-auto my-6 w-full max-w-xl max-h-[88vh] overflow-y-auto rounded-3xl border border-slate-200 bg-white p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900">Import CSV</h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  {movementType === "purchase"
+                    ? "Required: date, sku, quantity, total_amount. Optional: supplier."
+                    : "Required: date, sku, quantity, total_amount. Optional: channel."}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700"
+                onClick={() => setIsImportModalOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-5 space-y-3">
+              <button
+                type="button"
+                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-indigo-200 hover:text-indigo-700"
+                onClick={downloadCsvTemplate}
+              >
+                Download template
+              </button>
+              <input
+                className="block w-full text-sm text-slate-700 file:mr-3 file:rounded-full file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-slate-800"
+                type="file"
+                accept=".csv,text/csv"
+                onChange={handleImportCsv}
+                disabled={importing || !selectedStoreId}
+              />
+              {importing && <p className="text-xs text-slate-500">Importing...</p>}
+            </div>
+          </article>
+        </div>
+      )}
 
       {csvErrors.length > 0 && (
         <section className="rounded-2xl border border-rose-200 bg-rose-50 p-4">

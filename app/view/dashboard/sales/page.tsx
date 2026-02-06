@@ -4,8 +4,8 @@ export default function SalesPage() {
   return (
     <StockMovementsPage
       movementType="sale"
-      pageTitle="Ventas"
-      pageSubtitle="Registra salidas de inventario por venta."
+      pageTitle="Sales"
+      pageSubtitle="Track inventory outflows from sales."
     />
   );
 }

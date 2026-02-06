@@ -4,8 +4,8 @@ export default function PurchasesPage() {
   return (
     <StockMovementsPage
       movementType="purchase"
-      pageTitle="Compras"
-      pageSubtitle="Registra entradas de inventario por compra."
+      pageTitle="Purchases"
+      pageSubtitle="Track inventory inflows from purchases."
     />
   );
 }

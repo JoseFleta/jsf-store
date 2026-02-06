@@ -1,21 +1,11 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { supabaseBrowser } from "../../../../lib/supabaseBrowser";
 
 type ProductType = "ropa" | "maquetas" | "accesorios";
 type ProductTypeFilter = "all" | ProductType;
-
-type StoreRow = {
-  store_id: string;
-  stores: { name: string } | { name: string }[] | null;
-};
-
-type StoreOption = {
-  id: string;
-  name: string;
-};
 
 type ProductRow = {
   id: string;
@@ -46,17 +36,17 @@ type CsvProduct = {
 const PRODUCT_TYPES: ProductType[] = ["ropa", "maquetas", "accesorios"];
 
 function getTypeLabel(type: ProductType | ProductTypeFilter): string {
-  if (type === "ropa") return "Ropa";
-  if (type === "maquetas") return "Maquetas";
-  if (type === "accesorios") return "Accesorios";
-  return "Todos";
+  if (type === "ropa") return "Apparel";
+  if (type === "maquetas") return "Models";
+  if (type === "accesorios") return "Accessories";
+  return "All";
 }
 
 function getSubtypeLabel(type: ProductTypeFilter): string {
-  if (type === "maquetas") return "Escala";
-  if (type === "ropa") return "Tipo de ropa";
-  if (type === "accesorios") return "Tipo de accesorio";
-  return "Detalle tipo";
+  if (type === "maquetas") return "Scale";
+  if (type === "ropa") return "Clothing type";
+  if (type === "accesorios") return "Accessory type";
+  return "Type detail";
 }
 
 function getProductSubtype(product: ProductRow, typeFilter: ProductTypeFilter): string {
@@ -103,6 +93,12 @@ function parseDelimitedLine(line: string, delimiter: string): string[] {
   return result;
 }
 
+function escapeCsvValue(value: string | number | boolean | null | undefined): string {
+  const text = value == null ? "" : String(value);
+  if (/[",\r\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
+}
+
 function parseCsvProducts(csvText: string): { rows: CsvProduct[]; errors: string[] } {
   const lines = csvText
     .split(/\r?\n/)
@@ -110,7 +106,7 @@ function parseCsvProducts(csvText: string): { rows: CsvProduct[]; errors: string
     .filter((line) => line.length > 0);
 
   if (lines.length === 0) {
-    return { rows: [], errors: ["CSV vacio."] };
+    return { rows: [], errors: ["Empty CSV file."] };
   }
 
   const delimiter = lines[0].includes("\t") ? "\t" : lines[0].includes(";") ? ";" : ",";
@@ -125,7 +121,7 @@ function parseCsvProducts(csvText: string): { rows: CsvProduct[]; errors: string
   const activeIndex = header.indexOf("is_active");
 
   if (skuIndex < 0 || titleIndex < 0) {
-    return { rows: [], errors: ["El archivo debe incluir columnas sku,title (CSV o TSV)."] };
+    return { rows: [], errors: ["The file must include columns sku,title (CSV or TSV)."] };
   }
 
   const rows: CsvProduct[] = [];
@@ -145,17 +141,17 @@ function parseCsvProducts(csvText: string): { rows: CsvProduct[]; errors: string
     const activeRaw = activeIndex >= 0 ? (cols[activeIndex] || "").trim().toLowerCase() : "true";
 
     if (!sku || !title) {
-      errors.push(`Fila ${lineNo + 1}: sku y title son obligatorios.`);
+      errors.push(`Row ${lineNo + 1}: sku and title are required.`);
       continue;
     }
 
     if (typeIndex >= 0 && !parsedType) {
-      errors.push(`Fila ${lineNo + 1}: product_type invalido. Usa ropa, maquetas o accesorios.`);
+      errors.push(`Row ${lineNo + 1}: invalid product_type. Use ropa, maquetas, or accesorios.`);
       continue;
     }
 
     if (seen.has(sku)) {
-      errors.push(`Fila ${lineNo + 1}: sku repetido en el archivo (${sku}).`);
+      errors.push(`Row ${lineNo + 1}: duplicated sku in file (${sku}).`);
       continue;
     }
     seen.add(sku);
@@ -198,10 +194,10 @@ function normalizeProductRow(row: Partial<ProductRow> & { id: string; store_id: 
 
 export default function ProductsPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const supabase = useMemo(() => supabaseBrowser(), []);
 
-  const [stores, setStores] = useState<StoreOption[]>([]);
-  const [selectedStoreId, setSelectedStoreId] = useState<string>("");
+  const [selectedStoreId, setSelectedStoreId] = useState<string>(searchParams.get("store") || "");
   const [products, setProducts] = useState<ProductRow[]>([]);
 
   const [sku, setSku] = useState("");
@@ -212,6 +208,8 @@ export default function ProductsPage() {
   const [accessoryType, setAccessoryType] = useState("");
   const [catchyPhrase, setCatchyPhrase] = useState("");
   const [isActive, setIsActive] = useState(true);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
 
   const [search, setSearch] = useState("");
   const [productTypeFilter, setProductTypeFilter] = useState<ProductTypeFilter>("all");
@@ -230,7 +228,6 @@ export default function ProductsPage() {
   const [page, setPage] = useState(1);
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
 
-  const [loadingStores, setLoadingStores] = useState(true);
   const [loadingProducts, setLoadingProducts] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
@@ -240,48 +237,17 @@ export default function ProductsPage() {
   const [csvErrors, setCsvErrors] = useState<string[]>([]);
 
   useEffect(() => {
-    let cancelled = false;
+    setSelectedStoreId(searchParams.get("store") || "");
+  }, [searchParams]);
 
-    const loadStores = async () => {
+  useEffect(() => {
+    let cancelled = false;
+    const checkAuth = async () => {
       const { data: userRes } = await supabase.auth.getUser();
       if (cancelled) return;
-
-      if (!userRes.user) {
-        router.push("/view/login");
-        return;
-      }
-
-      const { data, error } = await supabase
-        .from("store_memberships")
-        .select("store_id, stores(name)")
-        .eq("user_id", userRes.user.id);
-
-      if (cancelled) return;
-
-      if (error) {
-        setMsg(error.message);
-        setLoadingStores(false);
-        return;
-      }
-
-      const options = (data as StoreRow[]).map((row) => {
-        const relation = row.stores;
-        const storeName = Array.isArray(relation) ? relation[0]?.name : relation?.name;
-        return {
-          id: row.store_id,
-          name: storeName || "Tienda sin nombre",
-        };
-      });
-
-      setStores(options);
-      setSelectedStoreId((prev) => prev || options[0]?.id || "");
-      if (options.length === 0) {
-        setMsg("No tienes tiendas asignadas todavia.");
-      }
-      setLoadingStores(false);
+      if (!userRes.user) router.push("/view/login");
     };
-
-    loadStores();
+    checkAuth();
     return () => {
       cancelled = true;
     };
@@ -381,13 +347,38 @@ export default function ProductsPage() {
     URL.revokeObjectURL(url);
   };
 
+  const downloadFilteredProductsCsv = () => {
+    const headers = ["sku", "title", "product_type", "type_detail", "tagline", "is_active", "created_at"];
+    const lines = filteredProducts.map((product) =>
+      [
+        product.sku,
+        product.title,
+        product.product_type,
+        getProductSubtype(product, "all"),
+        product.catchy_phrase || "",
+        product.is_active,
+        product.created_at,
+      ]
+        .map((value) => escapeCsvValue(value))
+        .join(","),
+    );
+    const csv = [headers.join(","), ...lines].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "products_export.csv";
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   const handleCreateProduct = async (e: FormEvent) => {
     e.preventDefault();
     setMsg("");
     setCsvErrors([]);
 
     if (!selectedStoreId) {
-      setMsg("Selecciona una tienda.");
+      setMsg("Select a store.");
       return;
     }
 
@@ -399,7 +390,7 @@ export default function ProductsPage() {
     const accessoryTypeValue = productType === "accesorios" ? accessoryType.trim() : "";
 
     if (!skuValue || !titleValue) {
-      setMsg("SKU y titulo son obligatorios.");
+      setMsg("SKU and title are required.");
       return;
     }
 
@@ -436,7 +427,8 @@ export default function ProductsPage() {
     setAccessoryType("");
     setCatchyPhrase("");
     setIsActive(true);
-    setMsg("Producto creado.");
+    setIsCreateModalOpen(false);
+    setMsg("Product created.");
   };
 
   const startEdit = (product: ProductRow) => {
@@ -476,7 +468,7 @@ export default function ProductsPage() {
     const accessoryTypeValue = editProductType === "accesorios" ? editAccessoryType.trim() : "";
 
     if (!skuValue || !titleValue) {
-      setMsg("SKU y titulo son obligatorios.");
+      setMsg("SKU and title are required.");
       return;
     }
 
@@ -507,7 +499,7 @@ export default function ProductsPage() {
 
     setProducts((prev) => prev.map((p) => (p.id === editingId ? normalizeProductRow(data as ProductRow) : p)));
     cancelEdit();
-    setMsg("Producto actualizado.");
+    setMsg("Product updated.");
   };
 
   const handleSoftDelete = async (product: ProductRow) => {
@@ -527,7 +519,7 @@ export default function ProductsPage() {
     }
 
     setProducts((prev) => prev.map((p) => (p.id === product.id ? normalizeProductRow(data as ProductRow) : p)));
-    setMsg("Producto desactivado.");
+    setMsg("Product deactivated.");
   };
 
   const handleImportCsv = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -535,7 +527,7 @@ export default function ProductsPage() {
     if (!file) return;
 
     if (!selectedStoreId) {
-      setMsg("Selecciona una tienda antes de importar.");
+      setMsg("Select a store before importing.");
       e.target.value = "";
       return;
     }
@@ -550,14 +542,14 @@ export default function ProductsPage() {
     if (parsed.errors.length > 0) {
       setImporting(false);
       setCsvErrors(parsed.errors);
-      setMsg(`CSV invalido: ${parsed.errors.length} errores.`);
+      setMsg(`Invalid CSV: ${parsed.errors.length} error(s).`);
       e.target.value = "";
       return;
     }
 
     if (parsed.rows.length === 0) {
       setImporting(false);
-      setMsg("No hay filas validas para importar.");
+      setMsg("No valid rows to import.");
       e.target.value = "";
       return;
     }
@@ -606,7 +598,8 @@ export default function ProductsPage() {
     }
 
     setProducts(((data ?? []) as Array<Partial<ProductRow> & { id: string; store_id: string }>).map(normalizeProductRow));
-    setMsg(`Importacion completa: ${parsed.rows.length} filas procesadas.`);
+    setMsg(`Import complete: ${parsed.rows.length} row(s) processed.`);
+    setIsImportModalOpen(false);
   };
 
   const toggleProductSelection = (productId: string, checked: boolean) => {
@@ -642,13 +635,13 @@ export default function ProductsPage() {
     }
 
     setProducts((prev) => prev.map((p) => (selectedProductIds.includes(p.id) ? { ...p, is_active: nextActive } : p)));
-    setMsg(nextActive ? "Productos activados." : "Productos desactivados.");
+    setMsg(nextActive ? "Products activated." : "Products deactivated.");
     setSelectedProductIds([]);
   };
 
   const handleBulkDelete = async () => {
     if (!selectedStoreId || selectedProductIds.length === 0) return;
-    const confirmed = window.confirm(`Eliminar ${selectedProductIds.length} producto(s)? Esta accion es permanente.`);
+    const confirmed = window.confirm(`Delete ${selectedProductIds.length} product(s)? This action is permanent.`);
     if (!confirmed) return;
 
     setMsg("");
@@ -662,48 +655,63 @@ export default function ProductsPage() {
     }
 
     setProducts((prev) => prev.filter((p) => !selectedProductIds.includes(p.id)));
-    setMsg("Productos eliminados.");
+    setMsg("Products deleted.");
     setSelectedProductIds([]);
   };
 
   return (
     <section className="space-y-6">
       <header className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-        <h1 className="text-2xl font-semibold text-slate-900">Productos</h1>
-        <p className="mt-1 text-sm text-slate-500">Crea y administra tu catalogo de productos por tienda.</p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-semibold text-slate-900">Products</h1>
+            <p className="mt-1 text-sm text-slate-500">Create and manage your product catalog by store.</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="rounded-full bg-slate-900 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:opacity-60"
+              onClick={() => setIsCreateModalOpen(true)}
+              disabled={!selectedStoreId}
+            >
+              Add new record
+            </button>
+            <button
+              type="button"
+              className="rounded-full border border-slate-300 bg-white px-5 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-400 disabled:opacity-60"
+              onClick={downloadFilteredProductsCsv}
+              disabled={!selectedStoreId || filteredProducts.length === 0}
+            >
+              Export CSV
+            </button>
+            <button
+              type="button"
+              className="rounded-full border border-slate-300 bg-white px-5 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-400 disabled:opacity-60"
+              onClick={() => setIsImportModalOpen(true)}
+              disabled={!selectedStoreId}
+            >
+              Import CSV
+            </button>
+          </div>
+        </div>
 
-        <div className="mt-5 grid gap-4 md:grid-cols-5">
+        <div className="mt-5 grid gap-4 md:grid-cols-4">
           <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Productos (filtro)</p>
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Products (filter)</p>
             <p className="mt-1 text-xl font-semibold text-slate-900">{stats.total}</p>
           </div>
           <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Activos (filtro)</p>
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Active (filter)</p>
             <p className="mt-1 text-xl font-semibold text-slate-900">{stats.active}</p>
           </div>
           <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-            <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Tienda</label>
-            <select
-              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
-              value={selectedStoreId}
-              onChange={(e) => setSelectedStoreId(e.target.value)}
-              disabled={loadingStores || stores.length === 0}
-            >
-              {stores.map((store) => (
-                <option key={store.id} value={store.id}>
-                  {store.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-            <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Tipo</label>
+            <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Type</label>
             <select
               className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
               value={productTypeFilter}
               onChange={(e) => setProductTypeFilter(e.target.value as ProductTypeFilter)}
             >
-              <option value="all">Todos</option>
+              <option value="all">All</option>
               {PRODUCT_TYPES.map((type) => (
                 <option key={type} value={type}>
                   {getTypeLabel(type)}
@@ -712,10 +720,10 @@ export default function ProductsPage() {
             </select>
           </div>
           <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-            <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Buscar</label>
+            <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Search</label>
             <input
               className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
-              placeholder="SKU o titulo"
+              placeholder="SKU or title"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
@@ -723,141 +731,15 @@ export default function ProductsPage() {
         </div>
       </header>
 
-      <div className="grid gap-6 lg:grid-cols-[380px_1fr]">
-        <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-          <h2 className="text-lg font-semibold text-slate-900">Nuevo producto</h2>
-          <p className="mt-1 text-sm text-slate-500">Usa SKU unico por tienda para evitar duplicados.</p>
-
-          <form className="mt-5 space-y-4" onSubmit={handleCreateProduct}>
-            <div>
-              <label className="text-sm font-medium text-slate-700">SKU</label>
-              <input
-                className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
-                value={sku}
-                onChange={(e) => setSku(e.target.value)}
-                placeholder="Ej. GASEOSA-600ML"
-              />
-            </div>
-
-            <div>
-              <label className="text-sm font-medium text-slate-700">Titulo</label>
-              <input
-                className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="Nombre estandarizado del producto"
-              />
-            </div>
-
-            <div>
-              <label className="text-sm font-medium text-slate-700">Tipo de producto</label>
-              <select
-                className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
-                value={productType}
-                onChange={(e) => setProductType(e.target.value as ProductType)}
-              >
-                {PRODUCT_TYPES.map((type) => (
-                  <option key={type} value={type}>
-                    {getTypeLabel(type)}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {productType === "maquetas" && (
-              <div>
-                <label className="text-sm font-medium text-slate-700">Escala</label>
-                <input
-                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
-                  value={escala}
-                  onChange={(e) => setEscala(e.target.value)}
-                  placeholder="Ej. 1:400"
-                />
-              </div>
-            )}
-
-            {productType === "ropa" && (
-              <div>
-                <label className="text-sm font-medium text-slate-700">Tipo de ropa</label>
-                <input
-                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
-                  value={clothingType}
-                  onChange={(e) => setClothingType(e.target.value)}
-                  placeholder="Ej. Camiseta"
-                />
-              </div>
-            )}
-
-            {productType === "accesorios" && (
-              <div>
-                <label className="text-sm font-medium text-slate-700">Tipo de accesorio</label>
-                <input
-                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
-                  value={accessoryType}
-                  onChange={(e) => setAccessoryType(e.target.value)}
-                  placeholder="Ej. Llavero"
-                />
-              </div>
-            )}
-
-            <div>
-              <label className="text-sm font-medium text-slate-700">Frase comercial</label>
-              <input
-                className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
-                value={catchyPhrase}
-                onChange={(e) => setCatchyPhrase(e.target.value)}
-                placeholder="Ej. Refrescante y ligera"
-              />
-            </div>
-
-            <label className="flex items-center gap-2 text-sm text-slate-700">
-              <input checked={isActive} onChange={(e) => setIsActive(e.target.checked)} type="checkbox" />
-              Activo
-            </label>
-
-            <button
-              className="w-full rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:opacity-60"
-              type="submit"
-              disabled={saving || !selectedStoreId}
-            >
-              {saving ? "Guardando..." : "Crear producto"}
-            </button>
-          </form>
-
-          <div className="mt-6 border-t border-slate-200 pt-5 space-y-3">
-            <div className="flex items-center justify-between gap-3">
-              <h3 className="text-sm font-semibold text-slate-900">Importar CSV</h3>
-              <button
-                type="button"
-                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-indigo-200 hover:text-indigo-700"
-                onClick={downloadCsvTemplate}
-              >
-                Descargar plantilla
-              </button>
-            </div>
-            <p className="text-xs text-slate-500">
-              Requeridas: sku,title. Opcionales: product_type, escala, clothing_type, accessory_type, catchy_phrase, is_active.
-            </p>
-            <input
-              className="block w-full text-sm text-slate-700 file:mr-3 file:rounded-full file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-slate-800"
-              type="file"
-              accept=".csv,text/csv"
-              onChange={handleImportCsv}
-              disabled={importing || !selectedStoreId}
-            />
-            {importing && <p className="text-xs text-slate-500">Importando...</p>}
-          </div>
-        </article>
-
-        <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+      <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
           <div className="flex items-end justify-between gap-3">
             <div>
-              <h2 className="text-lg font-semibold text-slate-900">Catalogo</h2>
-              <p className="mt-1 text-sm text-slate-500">Lista de productos registrados para la tienda seleccionada.</p>
+              <h2 className="text-lg font-semibold text-slate-900">Products</h2>
+              <p className="mt-1 text-sm text-slate-500">List of products for the selected store.</p>
             </div>
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-2">
-                <span className="text-xs font-medium text-slate-500">{selectedProductIds.length} seleccionados</span>
+                <span className="text-xs font-medium text-slate-500">{selectedProductIds.length} selected</span>
                 <button
                   type="button"
                   className="rounded-full border border-emerald-200 px-3 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
@@ -872,7 +754,7 @@ export default function ProductsPage() {
                   onClick={() => handleBulkSetActive(false)}
                   disabled={selectedProductIds.length === 0 || bulkWorking}
                 >
-                  Desactivar
+                  Deactivate
                 </button>
                 <button
                   type="button"
@@ -880,11 +762,11 @@ export default function ProductsPage() {
                   onClick={handleBulkDelete}
                   disabled={selectedProductIds.length === 0 || bulkWorking}
                 >
-                  Eliminar
+                  Delete
                 </button>
               </div>
               <div>
-              <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Por pagina</label>
+              <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Per page</label>
               <select
                 className="ml-2 rounded-xl border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700"
                 value={pageSize}
@@ -899,10 +781,10 @@ export default function ProductsPage() {
           </div>
 
           {loadingProducts ? (
-            <p className="mt-6 text-sm text-slate-500">Cargando productos...</p>
+            <p className="mt-6 text-sm text-slate-500">Loading products...</p>
           ) : paginatedProducts.length === 0 ? (
             <p className="mt-6 rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-500">
-              No hay productos para este filtro.
+              No products for this filter.
             </p>
           ) : (
             <div className="mt-4 overflow-x-auto">
@@ -914,16 +796,16 @@ export default function ProductsPage() {
                         type="checkbox"
                         checked={isAllCurrentPageSelected}
                         onChange={(e) => toggleSelectCurrentPage(e.target.checked)}
-                        aria-label="Seleccionar pagina"
+                        aria-label="Select page"
                       />
                     </th>
                     <th className="px-2 py-3">SKU</th>
-                    <th className="px-2 py-3">Titulo</th>
+                    <th className="px-2 py-3">Title</th>
                     <th className="px-2 py-3">Tipo</th>
                     <th className="px-2 py-3">{getSubtypeLabel(productTypeFilter)}</th>
-                    <th className="px-2 py-3">Frase comercial</th>
-                    <th className="px-2 py-3">Estado</th>
-                    <th className="px-2 py-3">Acciones</th>
+                    <th className="px-2 py-3">Tagline</th>
+                    <th className="px-2 py-3">Status</th>
+                    <th className="px-2 py-3">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -937,7 +819,7 @@ export default function ProductsPage() {
                             type="checkbox"
                             checked={selectedProductIds.includes(product.id)}
                             onChange={(e) => toggleProductSelection(product.id, e.target.checked)}
-                            aria-label={`Seleccionar ${product.sku}`}
+                            aria-label={`Select ${product.sku}`}
                           />
                         </td>
                         <td className="px-2 py-3 font-medium">
@@ -1019,7 +901,7 @@ export default function ProductsPage() {
                           {isEditing ? (
                             <label className="inline-flex items-center gap-2 text-xs">
                               <input type="checkbox" checked={editActive} onChange={(e) => setEditActive(e.target.checked)} />
-                              Activo
+                              Active
                             </label>
                           ) : (
                             <span
@@ -1029,7 +911,7 @@ export default function ProductsPage() {
                                   : "rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600"
                               }
                             >
-                              {product.is_active ? "Activo" : "Inactivo"}
+                              {product.is_active ? "Active" : "Inactive"}
                             </span>
                           )}
                         </td>
@@ -1043,14 +925,14 @@ export default function ProductsPage() {
                                   onClick={handleSaveEdit}
                                   disabled={savingEdit}
                                 >
-                                  {savingEdit ? "Guardando" : "Guardar"}
+                                  {savingEdit ? "Saving" : "Save"}
                                 </button>
                                 <button
                                   type="button"
                                   className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700"
                                   onClick={cancelEdit}
                                 >
-                                  Cancelar
+                                  Cancel
                                 </button>
                               </>
                             ) : (
@@ -1060,7 +942,7 @@ export default function ProductsPage() {
                                   className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-indigo-200 hover:text-indigo-700"
                                   onClick={() => startEdit(product)}
                                 >
-                                  Editar
+                                  Edit
                                 </button>
                                 {product.is_active && (
                                   <button
@@ -1068,7 +950,7 @@ export default function ProductsPage() {
                                     className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
                                     onClick={() => handleSoftDelete(product)}
                                   >
-                                    Desactivar
+                                    Deactivate
                                   </button>
                                 )}
                               </>
@@ -1085,7 +967,7 @@ export default function ProductsPage() {
 
           <div className="mt-4 flex items-center justify-between text-sm text-slate-600">
             <p>
-              Pagina {page} de {totalPages}
+              Page {page} of {totalPages}
             </p>
             <div className="flex gap-2">
               <button
@@ -1094,7 +976,7 @@ export default function ProductsPage() {
                 onClick={() => setPage((prev) => Math.max(1, prev - 1))}
                 disabled={page <= 1}
               >
-                Anterior
+                Prev
               </button>
               <button
                 type="button"
@@ -1102,18 +984,185 @@ export default function ProductsPage() {
                 onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
                 disabled={page >= totalPages}
               >
-                Siguiente
+                Next
               </button>
             </div>
           </div>
-        </article>
-      </div>
+      </article>
 
       {msg && <p className="text-sm text-slate-600">{msg}</p>}
 
+      {isCreateModalOpen && (
+        <div
+          className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/40 p-4"
+          onClick={() => setIsCreateModalOpen(false)}
+        >
+          <article
+            className="mx-auto my-6 w-full max-w-xl max-h-[88vh] overflow-y-auto rounded-3xl border border-slate-200 bg-white p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900">Add new record</h2>
+                <p className="mt-1 text-sm text-slate-500">Fill in the fields to create a new product.</p>
+              </div>
+              <button
+                type="button"
+                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700"
+                onClick={() => setIsCreateModalOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+
+            <form className="mt-5 space-y-4" onSubmit={handleCreateProduct}>
+              <div>
+                <label className="text-sm font-medium text-slate-700">SKU</label>
+                <input
+                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                  value={sku}
+                  onChange={(e) => setSku(e.target.value)}
+                  placeholder="e.g. SODA-600ML"
+                />
+              </div>
+
+              <div>
+                <label className="text-sm font-medium text-slate-700">Title</label>
+                <input
+                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="Standardized product name"
+                />
+              </div>
+
+              <div>
+                <label className="text-sm font-medium text-slate-700">Product type</label>
+                <select
+                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                  value={productType}
+                  onChange={(e) => setProductType(e.target.value as ProductType)}
+                >
+                  {PRODUCT_TYPES.map((type) => (
+                    <option key={type} value={type}>
+                      {getTypeLabel(type)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {productType === "maquetas" && (
+                <div>
+                  <label className="text-sm font-medium text-slate-700">Scale</label>
+                  <input
+                    className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                    value={escala}
+                    onChange={(e) => setEscala(e.target.value)}
+                    placeholder="e.g. 1:400"
+                  />
+                </div>
+              )}
+
+              {productType === "ropa" && (
+                <div>
+                  <label className="text-sm font-medium text-slate-700">Clothing type</label>
+                  <input
+                    className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                    value={clothingType}
+                    onChange={(e) => setClothingType(e.target.value)}
+                    placeholder="e.g. T-shirt"
+                  />
+                </div>
+              )}
+
+              {productType === "accesorios" && (
+                <div>
+                  <label className="text-sm font-medium text-slate-700">Accessory type</label>
+                  <input
+                    className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                    value={accessoryType}
+                    onChange={(e) => setAccessoryType(e.target.value)}
+                    placeholder="e.g. Keychain"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="text-sm font-medium text-slate-700">Tagline</label>
+                <input
+                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                  value={catchyPhrase}
+                  onChange={(e) => setCatchyPhrase(e.target.value)}
+                    placeholder="e.g. Refreshing and light"
+                />
+              </div>
+
+              <label className="flex items-center gap-2 text-sm text-slate-700">
+                <input checked={isActive} onChange={(e) => setIsActive(e.target.checked)} type="checkbox" />
+                Active
+              </label>
+
+              <button
+                className="w-full rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:opacity-60"
+                type="submit"
+                disabled={saving || !selectedStoreId}
+              >
+                {saving ? "Saving..." : "Create product"}
+              </button>
+            </form>
+          </article>
+        </div>
+      )}
+
+      {isImportModalOpen && (
+        <div
+          className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/40 p-4"
+          onClick={() => setIsImportModalOpen(false)}
+        >
+          <article
+            className="mx-auto my-6 w-full max-w-xl max-h-[88vh] overflow-y-auto rounded-3xl border border-slate-200 bg-white p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900">Import CSV</h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  Required: sku,title. Optional: product_type, escala, clothing_type, accessory_type, catchy_phrase, is_active.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700"
+                onClick={() => setIsImportModalOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-5 space-y-3">
+              <button
+                type="button"
+                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-indigo-200 hover:text-indigo-700"
+                onClick={downloadCsvTemplate}
+              >
+                Download template
+              </button>
+              <input
+                className="block w-full text-sm text-slate-700 file:mr-3 file:rounded-full file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-slate-800"
+                type="file"
+                accept=".csv,text/csv"
+                onChange={handleImportCsv}
+                disabled={importing || !selectedStoreId}
+              />
+              {importing && <p className="text-xs text-slate-500">Importing...</p>}
+            </div>
+          </article>
+        </div>
+      )}
+
       {csvErrors.length > 0 && (
         <section className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
-          <h3 className="text-sm font-semibold text-rose-800">Errores de importacion CSV ({csvErrors.length})</h3>
+          <h3 className="text-sm font-semibold text-rose-800">CSV import errors ({csvErrors.length})</h3>
           <div className="mt-2 max-h-48 overflow-auto rounded-lg border border-rose-200 bg-white p-3">
             <ul className="space-y-1 text-xs text-rose-700">
               {csvErrors.map((error, idx) => (
