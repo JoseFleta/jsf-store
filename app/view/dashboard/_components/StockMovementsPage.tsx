@@ -12,7 +12,6 @@ type StockMovementsPageProps = {
   movementType: MovementType;
   pageTitle: string;
   pageSubtitle: string;
-  counterpartyLabel: string;
 };
 
 type StoreRow = {
@@ -46,7 +45,6 @@ type MovementRow = {
   channel: string | null;
   occurred_on: string;
   reference: string | null;
-  counterparty: string | null;
   notes: string | null;
   created_at: string;
   products: ProductRow | ProductRow[] | null;
@@ -58,7 +56,6 @@ type CsvMovementInput = {
   quantity: number;
   total_amount: number;
   channel: string | null;
-  counterparty: string | null;
   reference: string | null;
   notes: string | null;
 };
@@ -164,7 +161,7 @@ function parseCsvMovements(text: string): { rows: CsvMovementInput[]; errors: st
   const channelIdx = header.indexOf("channel");
   const cpIdx = header.indexOf("counterparty");
   const supplierIdx = header.indexOf("proveedor");
-  const counterpartyIdx = cpIdx >= 0 ? cpIdx : supplierIdx;
+  const channelAliasIdx = channelIdx >= 0 ? channelIdx : cpIdx >= 0 ? cpIdx : supplierIdx;
   const refIdx = header.indexOf("reference");
   const notesIdx = header.indexOf("notes");
 
@@ -205,8 +202,7 @@ function parseCsvMovements(text: string): { rows: CsvMovementInput[]; errors: st
       sku,
       quantity,
       total_amount,
-      channel: channelIdx >= 0 ? (cols[channelIdx] || "").trim() || null : null,
-      counterparty: counterpartyIdx >= 0 ? (cols[counterpartyIdx] || "").trim() || null : null,
+      channel: channelAliasIdx >= 0 ? (cols[channelAliasIdx] || "").trim() || null : null,
       reference: refIdx >= 0 ? (cols[refIdx] || "").trim() || null : null,
       notes: notesIdx >= 0 ? (cols[notesIdx] || "").trim() || null : null,
     });
@@ -216,7 +212,7 @@ function parseCsvMovements(text: string): { rows: CsvMovementInput[]; errors: st
 }
 
 export default function StockMovementsPage(props: StockMovementsPageProps) {
-  const { movementType, pageTitle, pageSubtitle, counterpartyLabel } = props;
+  const { movementType, pageTitle, pageSubtitle } = props;
 
   const router = useRouter();
   const supabase = useMemo(() => supabaseBrowser(), []);
@@ -232,7 +228,6 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
   const [totalAmount, setTotalAmount] = useState("");
   const [reference, setReference] = useState("");
   const [channel, setChannel] = useState("");
-  const [counterparty, setCounterparty] = useState("");
   const [notes, setNotes] = useState("");
 
   const [search, setSearch] = useState("");
@@ -247,14 +242,12 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
   const [editQuantity, setEditQuantity] = useState("");
   const [editTotalAmount, setEditTotalAmount] = useState("");
   const [editChannel, setEditChannel] = useState("");
-  const [editCounterparty, setEditCounterparty] = useState("");
   const [editReference, setEditReference] = useState("");
   const [editNotes, setEditNotes] = useState("");
 
   const [bulkOccurredOn, setBulkOccurredOn] = useState("");
   const [bulkTotalAmount, setBulkTotalAmount] = useState("");
   const [bulkChannel, setBulkChannel] = useState("");
-  const [bulkCounterparty, setBulkCounterparty] = useState("");
   const [bulkReference, setBulkReference] = useState("");
   const [bulkNotes, setBulkNotes] = useState("");
 
@@ -362,7 +355,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
       const { data, error } = await supabase
         .from("stock_movements")
         .select(
-          "id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,reference,counterparty,notes,created_at,products(id,sku,name,title,product_type,escala,clothing_type,accessory_type)"
+          "id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,reference,notes,created_at,products(id,sku,name,title,product_type,escala,clothing_type,accessory_type)"
         )
         .eq("store_id", selectedStoreId)
         .eq("movement_type", movementType)
@@ -399,11 +392,10 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
       const name = getProductName(row.products).toLowerCase();
       const ch = (row.channel || "").toLowerCase();
       const ref = (row.reference || "").toLowerCase();
-      const cp = (row.counterparty || "").toLowerCase();
       const subtype = getProductSubtype(row.products, "all").toLowerCase();
       const type = getProductType(row.products);
       const typeMatch = productTypeFilter === "all" ? true : type === productTypeFilter;
-      return typeMatch && (sku.includes(term) || name.includes(term) || ch.includes(term) || ref.includes(term) || cp.includes(term) || subtype.includes(term));
+      return typeMatch && (sku.includes(term) || name.includes(term) || ch.includes(term) || ref.includes(term) || subtype.includes(term));
     });
   }, [rows, search, productTypeFilter]);
 
@@ -480,14 +472,13 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
         quantity: qty,
         qty_change: movementType === "purchase" ? qty : -qty,
         unit_price: amount,
-        channel: movementType === "sale" ? channel.trim() || null : null,
+        channel: channel.trim() || null,
         occurred_on: occurredOn,
         reference: reference.trim() || null,
-        counterparty: counterparty.trim() || null,
         notes: notes.trim() || null,
       })
       .select(
-        "id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,reference,counterparty,notes,created_at,products(id,sku,name,title,product_type,escala,clothing_type,accessory_type)"
+        "id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,reference,notes,created_at,products(id,sku,name,title,product_type,escala,clothing_type,accessory_type)"
       )
       .single();
     setSaving(false);
@@ -502,7 +493,6 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     setTotalAmount("");
     setChannel("");
     setReference("");
-    setCounterparty("");
     setNotes("");
     setMsg(movementType === "purchase" ? "Purchase added." : "Sale added.");
   };
@@ -511,10 +501,10 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     const sample = [
       movementType === "purchase"
         ? "date,sku,quantity,total_amount,proveedor,reference,notes"
-        : "date,sku,quantity,total_amount,channel,counterparty,reference,notes",
+        : "date,sku,quantity,total_amount,channel,reference,notes",
       movementType === "purchase"
         ? "2026-02-06,AAS-TEST-001,10,255.00,Supplier XYZ,INV-1001,Initial stock"
-        : "2026-02-06,AAS-TEST-001,2,79.98,Mercado Libre,Customer ABC,SO-2001,Online sale",
+        : "2026-02-06,AAS-TEST-001,2,79.98,Mercado Libre,SO-2001,Online sale",
     ].join("\n");
 
     const blob = new Blob([sample], { type: "text/csv;charset=utf-8;" });
@@ -572,9 +562,8 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
           quantity: row.quantity,
           qty_change: movementType === "purchase" ? row.quantity : -row.quantity,
           unit_price: row.total_amount,
-          channel: movementType === "sale" ? row.channel : null,
+          channel: row.channel,
           occurred_on: row.occurred_on,
-          counterparty: row.counterparty,
           reference: row.reference,
           notes: row.notes,
         };
@@ -604,7 +593,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     const { data, error } = await supabase
       .from("stock_movements")
       .select(
-        "id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,reference,counterparty,notes,created_at,products(id,sku,name,title,product_type,escala,clothing_type,accessory_type)"
+        "id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,reference,notes,created_at,products(id,sku,name,title,product_type,escala,clothing_type,accessory_type)"
       )
       .eq("store_id", selectedStoreId)
       .eq("movement_type", movementType)
@@ -646,7 +635,6 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     setEditQuantity(String(row.quantity));
     setEditTotalAmount(String(row.unit_price));
     setEditChannel(row.channel || "");
-    setEditCounterparty(row.counterparty || "");
     setEditReference(row.reference || "");
     setEditNotes(row.notes || "");
     setMsg("");
@@ -659,7 +647,6 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     setEditQuantity("");
     setEditTotalAmount("");
     setEditChannel("");
-    setEditCounterparty("");
     setEditReference("");
     setEditNotes("");
   };
@@ -682,8 +669,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
         quantity: qty,
         qty_change: movementType === "purchase" ? qty : -qty,
         unit_price: amount,
-        channel: movementType === "sale" ? editChannel.trim() || null : null,
-        counterparty: editCounterparty.trim() || null,
+        channel: editChannel.trim() || null,
         reference: editReference.trim() || null,
         notes: editNotes.trim() || null,
       })
@@ -691,7 +677,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
       .eq("store_id", selectedStoreId)
       .eq("movement_type", movementType)
       .select(
-        "id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,reference,counterparty,notes,created_at,products(id,sku,name,title,product_type,escala,clothing_type,accessory_type)"
+        "id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,reference,notes,created_at,products(id,sku,name,title,product_type,escala,clothing_type,accessory_type)"
       )
       .single();
     setSavingEdit(false);
@@ -756,8 +742,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
       if (!Number.isFinite(amount) || amount < 0) return setMsg("Total amount must be 0 or greater.");
       patch.unit_price = amount;
     }
-    if (movementType === "sale" && bulkChannel.trim()) patch.channel = bulkChannel.trim();
-    if (bulkCounterparty.trim()) patch.counterparty = bulkCounterparty.trim();
+    if (bulkChannel.trim()) patch.channel = bulkChannel.trim();
     if (bulkReference.trim()) patch.reference = bulkReference.trim();
     if (bulkNotes.trim()) patch.notes = bulkNotes.trim();
 
@@ -788,7 +773,6 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
           occurred_on: (patch.occurred_on as string | undefined) ?? row.occurred_on,
           unit_price: (patch.unit_price as number | undefined) ?? row.unit_price,
           channel: (patch.channel as string | undefined) ?? row.channel,
-          counterparty: (patch.counterparty as string | undefined) ?? row.counterparty,
           reference: (patch.reference as string | undefined) ?? row.reference,
           notes: (patch.notes as string | undefined) ?? row.notes,
         };
@@ -798,7 +782,6 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     setBulkOccurredOn("");
     setBulkTotalAmount("");
     setBulkChannel("");
-    setBulkCounterparty("");
     setBulkReference("");
     setBulkNotes("");
     setSelectedRowIds([]);
@@ -912,26 +895,14 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
             </div>
 
             <div>
-              <label className="text-sm font-medium text-slate-700">{counterpartyLabel}</label>
+              <label className="text-sm font-medium text-slate-700">Channel</label>
               <input
                 className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm"
-                value={counterparty}
-                onChange={(e) => setCounterparty(e.target.value)}
-                placeholder={movementType === "purchase" ? "Supplier" : "Customer"}
+                value={channel}
+                onChange={(e) => setChannel(e.target.value)}
+                placeholder={movementType === "purchase" ? "Proveedor / canal" : "Marketplace / canal"}
               />
             </div>
-
-            {movementType === "sale" && (
-              <div>
-                <label className="text-sm font-medium text-slate-700">Channel</label>
-                <input
-                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm"
-                  value={channel}
-                  onChange={(e) => setChannel(e.target.value)}
-                  placeholder="Mercado Libre, Amazon, Instagram..."
-                />
-              </div>
-            )}
 
             <div>
               <label className="text-sm font-medium text-slate-700">Reference</label>
@@ -976,7 +947,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
             <p className="text-xs text-slate-500">
               {movementType === "purchase"
                 ? "Required columns: date, sku, quantity, total_amount. Optional: proveedor, reference, notes."
-                : "Required columns: date, sku, quantity, total_amount. Optional: channel, counterparty, reference, notes."}
+                : "Required columns: date, sku, quantity, total_amount. Optional: channel, reference, notes."}
             </p>
             <input
               className="block w-full text-sm text-slate-700 file:mr-3 file:rounded-full file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-slate-800"
@@ -1067,9 +1038,9 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
             )}
             <input
               className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-              value={bulkCounterparty}
-              onChange={(e) => setBulkCounterparty(e.target.value)}
-              placeholder={counterpartyLabel}
+              value={bulkChannel}
+              onChange={(e) => setBulkChannel(e.target.value)}
+              placeholder="Channel"
             />
             <input
               className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
@@ -1111,8 +1082,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
                     <th className="px-2 py-3">{getSubtypeLabel(productTypeFilter)}</th>
                     <th className="px-2 py-3">Qty</th>
                     <th className="px-2 py-3">Total amount</th>
-                    {movementType === "sale" && <th className="px-2 py-3">Channel</th>}
-                    <th className="px-2 py-3">{counterpartyLabel}</th>
+                    <th className="px-2 py-3">Channel</th>
                     <th className="px-2 py-3">Reference</th>
                     <th className="px-2 py-3">Notes</th>
                     <th className="px-2 py-3">Actions</th>
@@ -1193,28 +1163,15 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
                             toCurrency(totalAmountValue)
                           )}
                         </td>
-                        {movementType === "sale" && (
-                          <td className="px-2 py-3">
-                            {isEditing ? (
-                              <input
-                                className="w-28 rounded-lg border border-slate-200 px-2 py-1"
-                                value={editChannel}
-                                onChange={(e) => setEditChannel(e.target.value)}
-                              />
-                            ) : (
-                              row.channel || "-"
-                            )}
-                          </td>
-                        )}
                         <td className="px-2 py-3">
                           {isEditing ? (
                             <input
                               className="w-28 rounded-lg border border-slate-200 px-2 py-1"
-                              value={editCounterparty}
-                              onChange={(e) => setEditCounterparty(e.target.value)}
+                              value={editChannel}
+                              onChange={(e) => setEditChannel(e.target.value)}
                             />
                           ) : (
-                            row.counterparty || "-"
+                            row.channel || "-"
                           )}
                         </td>
                         <td className="px-2 py-3">

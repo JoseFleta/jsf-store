@@ -6,7 +6,6 @@ export default function PurchasesPage() {
       movementType="purchase"
       pageTitle="Compras"
       pageSubtitle="Registra entradas de inventario por compra."
-      counterpartyLabel="Proveedor"
     />
   );
 }
