@@ -6,7 +6,6 @@ export default function SalesPage() {
       movementType="sale"
       pageTitle="Ventas"
       pageSubtitle="Registra salidas de inventario por venta."
-      counterpartyLabel="Cliente"
     />
   );
 }

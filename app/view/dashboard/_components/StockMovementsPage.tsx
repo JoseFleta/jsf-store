@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { supabaseBrowser } from "../../../../lib/supabaseBrowser";
 
 type MovementType = "purchase" | "sale";
+type ProductType = "ropa" | "maquetas" | "accesorios";
+type ProductTypeFilter = "all" | ProductType;
 
 type StockMovementsPageProps = {
   movementType: MovementType;
@@ -28,6 +30,10 @@ type ProductRow = {
   sku: string;
   name?: string | null;
   title?: string | null;
+  product_type?: ProductType | null;
+  escala?: string | null;
+  clothing_type?: string | null;
+  accessory_type?: string | null;
 };
 
 type MovementRow = {
@@ -37,6 +43,7 @@ type MovementRow = {
   movement_type: MovementType;
   quantity: number;
   unit_price: number;
+  channel: string | null;
   occurred_on: string;
   reference: string | null;
   counterparty: string | null;
@@ -49,7 +56,8 @@ type CsvMovementInput = {
   occurred_on: string;
   sku: string;
   quantity: number;
-  unit_price: number;
+  total_amount: number;
+  channel: string | null;
   counterparty: string | null;
   reference: string | null;
   notes: string | null;
@@ -64,6 +72,37 @@ function getProductName(product: ProductRow | ProductRow[] | null): string {
 function getProductSku(product: ProductRow | ProductRow[] | null): string {
   const p = Array.isArray(product) ? product[0] : product;
   return p?.sku || "-";
+}
+
+function getTypeLabel(type: ProductType | ProductTypeFilter): string {
+  if (type === "ropa") return "Ropa";
+  if (type === "maquetas") return "Maquetas";
+  if (type === "accesorios") return "Accesorios";
+  return "Todos";
+}
+
+function getSubtypeLabel(type: ProductTypeFilter): string {
+  if (type === "maquetas") return "Escala";
+  if (type === "ropa") return "Tipo de ropa";
+  if (type === "accesorios") return "Tipo de accesorio";
+  return "Detalle tipo";
+}
+
+function getProductType(product: ProductRow | ProductRow[] | null): ProductType | null {
+  const p = Array.isArray(product) ? product[0] : product;
+  if (!p?.product_type) return null;
+  if (p.product_type === "ropa" || p.product_type === "maquetas" || p.product_type === "accesorios") return p.product_type;
+  return null;
+}
+
+function getProductSubtype(product: ProductRow | ProductRow[] | null, typeFilter: ProductTypeFilter): string {
+  const p = Array.isArray(product) ? product[0] : product;
+  if (!p) return "-";
+  const productType = typeFilter === "all" ? getProductType(p) : typeFilter;
+  if (productType === "maquetas") return p.escala || "-";
+  if (productType === "ropa") return p.clothing_type || "-";
+  if (productType === "accesorios") return p.accessory_type || "-";
+  return "-";
 }
 
 function toCurrency(value: number): string {
@@ -116,15 +155,23 @@ function parseCsvMovements(text: string): { rows: CsvMovementInput[]; errors: st
   const dateIdx = header.indexOf("date") >= 0 ? header.indexOf("date") : header.indexOf("occurred_on");
   const skuIdx = header.indexOf("sku");
   const qtyIdx = header.indexOf("quantity") >= 0 ? header.indexOf("quantity") : header.indexOf("qty");
-  const priceIdx = header.indexOf("unit_price") >= 0 ? header.indexOf("unit_price") : header.indexOf("price");
+  const amountIdx =
+    header.indexOf("total_amount") >= 0
+      ? header.indexOf("total_amount")
+      : header.indexOf("unit_price") >= 0
+      ? header.indexOf("unit_price")
+      : header.indexOf("price");
+  const channelIdx = header.indexOf("channel");
   const cpIdx = header.indexOf("counterparty");
+  const supplierIdx = header.indexOf("proveedor");
+  const counterpartyIdx = cpIdx >= 0 ? cpIdx : supplierIdx;
   const refIdx = header.indexOf("reference");
   const notesIdx = header.indexOf("notes");
 
-  if (dateIdx < 0 || skuIdx < 0 || qtyIdx < 0 || priceIdx < 0) {
+  if (dateIdx < 0 || skuIdx < 0 || qtyIdx < 0 || amountIdx < 0) {
     return {
       rows: [],
-      errors: ["El archivo debe incluir: date, sku, quantity, unit_price (acepta CSV o TSV)."],
+      errors: ["El archivo debe incluir: date, sku, quantity, total_amount (acepta CSV o TSV)."],
     };
   }
 
@@ -136,20 +183,20 @@ function parseCsvMovements(text: string): { rows: CsvMovementInput[]; errors: st
     const occurred_on = (cols[dateIdx] || "").trim();
     const sku = (cols[skuIdx] || "").trim().toUpperCase();
     const qtyRaw = (cols[qtyIdx] || "").trim();
-    const priceRaw = (cols[priceIdx] || "").trim();
+    const amountRaw = (cols[amountIdx] || "").trim();
     const quantity = Number(qtyRaw);
-    const unit_price = Number(priceRaw);
+    const total_amount = Number(amountRaw);
 
-    if (!occurred_on || !sku || !qtyRaw || !priceRaw) {
-      errors.push(`Fila ${i + 1}: date, sku, quantity y unit_price son obligatorios.`);
+    if (!occurred_on || !sku || !qtyRaw || !amountRaw) {
+      errors.push(`Fila ${i + 1}: date, sku, quantity y total_amount son obligatorios.`);
       continue;
     }
     if (!Number.isFinite(quantity) || quantity <= 0) {
       errors.push(`Fila ${i + 1}: quantity debe ser mayor a 0.`);
       continue;
     }
-    if (!Number.isFinite(unit_price) || unit_price < 0) {
-      errors.push(`Fila ${i + 1}: unit_price debe ser 0 o mayor.`);
+    if (!Number.isFinite(total_amount) || total_amount < 0) {
+      errors.push(`Fila ${i + 1}: total_amount debe ser 0 o mayor.`);
       continue;
     }
 
@@ -157,8 +204,9 @@ function parseCsvMovements(text: string): { rows: CsvMovementInput[]; errors: st
       occurred_on,
       sku,
       quantity,
-      unit_price,
-      counterparty: cpIdx >= 0 ? (cols[cpIdx] || "").trim() || null : null,
+      total_amount,
+      channel: channelIdx >= 0 ? (cols[channelIdx] || "").trim() || null : null,
+      counterparty: counterpartyIdx >= 0 ? (cols[counterpartyIdx] || "").trim() || null : null,
       reference: refIdx >= 0 ? (cols[refIdx] || "").trim() || null : null,
       notes: notesIdx >= 0 ? (cols[notesIdx] || "").trim() || null : null,
     });
@@ -181,19 +229,41 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
   const [occurredOn, setOccurredOn] = useState(() => new Date().toISOString().slice(0, 10));
   const [productId, setProductId] = useState("");
   const [quantity, setQuantity] = useState("");
-  const [unitPrice, setUnitPrice] = useState("");
+  const [totalAmount, setTotalAmount] = useState("");
   const [reference, setReference] = useState("");
+  const [channel, setChannel] = useState("");
   const [counterparty, setCounterparty] = useState("");
   const [notes, setNotes] = useState("");
 
   const [search, setSearch] = useState("");
+  const [productTypeFilter, setProductTypeFilter] = useState<ProductTypeFilter>("all");
   const [pageSize, setPageSize] = useState(10);
   const [page, setPage] = useState(1);
+  const [selectedRowIds, setSelectedRowIds] = useState<string[]>([]);
+
+  const [editingRowId, setEditingRowId] = useState<string | null>(null);
+  const [editOccurredOn, setEditOccurredOn] = useState("");
+  const [editProductId, setEditProductId] = useState("");
+  const [editQuantity, setEditQuantity] = useState("");
+  const [editTotalAmount, setEditTotalAmount] = useState("");
+  const [editChannel, setEditChannel] = useState("");
+  const [editCounterparty, setEditCounterparty] = useState("");
+  const [editReference, setEditReference] = useState("");
+  const [editNotes, setEditNotes] = useState("");
+
+  const [bulkOccurredOn, setBulkOccurredOn] = useState("");
+  const [bulkTotalAmount, setBulkTotalAmount] = useState("");
+  const [bulkChannel, setBulkChannel] = useState("");
+  const [bulkCounterparty, setBulkCounterparty] = useState("");
+  const [bulkReference, setBulkReference] = useState("");
+  const [bulkNotes, setBulkNotes] = useState("");
 
   const [loadingStores, setLoadingStores] = useState(true);
   const [loadingProducts, setLoadingProducts] = useState(false);
   const [loadingRows, setLoadingRows] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [bulkWorking, setBulkWorking] = useState(false);
   const [importing, setImporting] = useState(false);
   const [msg, setMsg] = useState("");
   const [csvErrors, setCsvErrors] = useState<string[]>([]);
@@ -253,7 +323,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
       setLoadingProducts(true);
       const { data, error } = await supabase
         .from("products")
-        .select("id,sku,name,title")
+        .select("id,sku,name,title,product_type,escala,clothing_type,accessory_type")
         .eq("store_id", selectedStoreId)
         .eq("is_active", true)
         .order("sku", { ascending: true });
@@ -292,7 +362,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
       const { data, error } = await supabase
         .from("stock_movements")
         .select(
-          "id,store_id,product_id,movement_type,quantity,unit_price,occurred_on,reference,counterparty,notes,created_at,products(id,sku,name,title)"
+          "id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,reference,counterparty,notes,created_at,products(id,sku,name,title,product_type,escala,clothing_type,accessory_type)"
         )
         .eq("store_id", selectedStoreId)
         .eq("movement_type", movementType)
@@ -320,38 +390,67 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
 
   const filteredRows = useMemo(() => {
     const term = search.trim().toLowerCase();
-    if (!term) return rows;
+    if (!term) {
+      return rows.filter((row) => (productTypeFilter === "all" ? true : getProductType(row.products) === productTypeFilter));
+    }
 
     return rows.filter((row) => {
       const sku = getProductSku(row.products).toLowerCase();
       const name = getProductName(row.products).toLowerCase();
+      const ch = (row.channel || "").toLowerCase();
       const ref = (row.reference || "").toLowerCase();
       const cp = (row.counterparty || "").toLowerCase();
-      return sku.includes(term) || name.includes(term) || ref.includes(term) || cp.includes(term);
+      const subtype = getProductSubtype(row.products, "all").toLowerCase();
+      const type = getProductType(row.products);
+      const typeMatch = productTypeFilter === "all" ? true : type === productTypeFilter;
+      return typeMatch && (sku.includes(term) || name.includes(term) || ch.includes(term) || ref.includes(term) || cp.includes(term) || subtype.includes(term));
     });
-  }, [rows, search]);
+  }, [rows, search, productTypeFilter]);
+
+  const filteredProducts = useMemo(() => {
+    return products.filter((p) => (productTypeFilter === "all" ? true : p.product_type === productTypeFilter));
+  }, [products, productTypeFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
 
   useEffect(() => {
     setPage(1);
-  }, [selectedStoreId, search, pageSize]);
+  }, [selectedStoreId, search, pageSize, productTypeFilter]);
+
+  useEffect(() => {
+    if (filteredProducts.length === 0) {
+      setProductId("");
+      return;
+    }
+    if (!filteredProducts.some((p) => p.id === productId)) {
+      setProductId(filteredProducts[0].id);
+    }
+  }, [filteredProducts, productId]);
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
   }, [page, totalPages]);
+
+  useEffect(() => {
+    setSelectedRowIds([]);
+    setEditingRowId(null);
+  }, [selectedStoreId, movementType]);
 
   const paginatedRows = useMemo(() => {
     const start = (page - 1) * pageSize;
     return filteredRows.slice(start, start + pageSize);
   }, [filteredRows, page, pageSize]);
 
+  const isAllCurrentPageSelected = useMemo(() => {
+    return paginatedRows.length > 0 && paginatedRows.every((row) => selectedRowIds.includes(row.id));
+  }, [paginatedRows, selectedRowIds]);
+
   const totals = useMemo(() => {
     let qty = 0;
     let amount = 0;
     for (const row of filteredRows) {
       qty += Number(row.quantity || 0);
-      amount += Number(row.quantity || 0) * Number(row.unit_price || 0);
+      amount += Number(row.unit_price || 0);
     }
     return { qty, amount };
   }, [filteredRows]);
@@ -365,11 +464,11 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     if (!productId) return setMsg("Select a product.");
 
     const qty = Number(quantity);
-    const price = Number(unitPrice);
+    const amount = Number(totalAmount);
 
     if (!occurredOn) return setMsg("Date is required.");
     if (!Number.isFinite(qty) || qty <= 0) return setMsg("Quantity must be greater than 0.");
-    if (!Number.isFinite(price) || price < 0) return setMsg("Unit price must be 0 or greater.");
+    if (!Number.isFinite(amount) || amount < 0) return setMsg("Total amount must be 0 or greater.");
 
     setSaving(true);
     const { data, error } = await supabase
@@ -379,14 +478,16 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
         product_id: productId,
         movement_type: movementType,
         quantity: qty,
-        unit_price: price,
+        qty_change: movementType === "purchase" ? qty : -qty,
+        unit_price: amount,
+        channel: movementType === "sale" ? channel.trim() || null : null,
         occurred_on: occurredOn,
         reference: reference.trim() || null,
         counterparty: counterparty.trim() || null,
         notes: notes.trim() || null,
       })
       .select(
-        "id,store_id,product_id,movement_type,quantity,unit_price,occurred_on,reference,counterparty,notes,created_at,products(id,sku,name,title)"
+        "id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,reference,counterparty,notes,created_at,products(id,sku,name,title,product_type,escala,clothing_type,accessory_type)"
       )
       .single();
     setSaving(false);
@@ -398,7 +499,8 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
 
     setRows((prev) => [data as MovementRow, ...prev]);
     setQuantity("");
-    setUnitPrice("");
+    setTotalAmount("");
+    setChannel("");
     setReference("");
     setCounterparty("");
     setNotes("");
@@ -407,10 +509,12 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
 
   const downloadCsvTemplate = () => {
     const sample = [
-      "date,sku,quantity,unit_price,counterparty,reference,notes",
       movementType === "purchase"
-        ? "2026-02-06,AAS-TEST-001,10,25.50,Supplier XYZ,INV-1001,Initial stock"
-        : "2026-02-06,AAS-TEST-001,2,39.99,Customer ABC,SO-2001,Online sale",
+        ? "date,sku,quantity,total_amount,proveedor,reference,notes"
+        : "date,sku,quantity,total_amount,channel,counterparty,reference,notes",
+      movementType === "purchase"
+        ? "2026-02-06,AAS-TEST-001,10,255.00,Supplier XYZ,INV-1001,Initial stock"
+        : "2026-02-06,AAS-TEST-001,2,79.98,Mercado Libre,Customer ABC,SO-2001,Online sale",
     ].join("\n");
 
     const blob = new Blob([sample], { type: "text/csv;charset=utf-8;" });
@@ -466,7 +570,9 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
           product_id,
           movement_type: movementType,
           quantity: row.quantity,
-          unit_price: row.unit_price,
+          qty_change: movementType === "purchase" ? row.quantity : -row.quantity,
+          unit_price: row.total_amount,
+          channel: movementType === "sale" ? row.channel : null,
           occurred_on: row.occurred_on,
           counterparty: row.counterparty,
           reference: row.reference,
@@ -498,7 +604,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     const { data, error } = await supabase
       .from("stock_movements")
       .select(
-        "id,store_id,product_id,movement_type,quantity,unit_price,occurred_on,reference,counterparty,notes,created_at,products(id,sku,name,title)"
+        "id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,reference,counterparty,notes,created_at,products(id,sku,name,title,product_type,escala,clothing_type,accessory_type)"
       )
       .eq("store_id", selectedStoreId)
       .eq("movement_type", movementType)
@@ -517,13 +623,195 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     setMsg(`Import complete: ${payload.length} rows processed.`);
   };
 
+  const toggleRowSelection = (rowId: string, checked: boolean) => {
+    setSelectedRowIds((prev) => {
+      if (checked) return prev.includes(rowId) ? prev : [...prev, rowId];
+      return prev.filter((id) => id !== rowId);
+    });
+  };
+
+  const toggleSelectCurrentPage = (checked: boolean) => {
+    const pageIds = paginatedRows.map((row) => row.id);
+    if (checked) {
+      setSelectedRowIds((prev) => Array.from(new Set([...prev, ...pageIds])));
+      return;
+    }
+    setSelectedRowIds((prev) => prev.filter((id) => !pageIds.includes(id)));
+  };
+
+  const startEditRow = (row: MovementRow) => {
+    setEditingRowId(row.id);
+    setEditOccurredOn(row.occurred_on);
+    setEditProductId(row.product_id);
+    setEditQuantity(String(row.quantity));
+    setEditTotalAmount(String(row.unit_price));
+    setEditChannel(row.channel || "");
+    setEditCounterparty(row.counterparty || "");
+    setEditReference(row.reference || "");
+    setEditNotes(row.notes || "");
+    setMsg("");
+  };
+
+  const cancelEditRow = () => {
+    setEditingRowId(null);
+    setEditOccurredOn("");
+    setEditProductId("");
+    setEditQuantity("");
+    setEditTotalAmount("");
+    setEditChannel("");
+    setEditCounterparty("");
+    setEditReference("");
+    setEditNotes("");
+  };
+
+  const handleSaveRowEdit = async () => {
+    if (!editingRowId || !selectedStoreId) return;
+    const qty = Number(editQuantity);
+    const amount = Number(editTotalAmount);
+    if (!editOccurredOn) return setMsg("Date is required.");
+    if (!editProductId) return setMsg("Product is required.");
+    if (!Number.isFinite(qty) || qty <= 0) return setMsg("Quantity must be greater than 0.");
+    if (!Number.isFinite(amount) || amount < 0) return setMsg("Total amount must be 0 or greater.");
+
+    setSavingEdit(true);
+    const { data, error } = await supabase
+      .from("stock_movements")
+      .update({
+        occurred_on: editOccurredOn,
+        product_id: editProductId,
+        quantity: qty,
+        qty_change: movementType === "purchase" ? qty : -qty,
+        unit_price: amount,
+        channel: movementType === "sale" ? editChannel.trim() || null : null,
+        counterparty: editCounterparty.trim() || null,
+        reference: editReference.trim() || null,
+        notes: editNotes.trim() || null,
+      })
+      .eq("id", editingRowId)
+      .eq("store_id", selectedStoreId)
+      .eq("movement_type", movementType)
+      .select(
+        "id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,reference,counterparty,notes,created_at,products(id,sku,name,title,product_type,escala,clothing_type,accessory_type)"
+      )
+      .single();
+    setSavingEdit(false);
+
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
+
+    setRows((prev) => prev.map((row) => (row.id === editingRowId ? (data as MovementRow) : row)));
+    cancelEditRow();
+    setMsg("Record updated.");
+  };
+
+  const handleDeleteRow = async (rowId: string) => {
+    if (!selectedStoreId) return;
+    const confirmed = window.confirm("Delete this record?");
+    if (!confirmed) return;
+
+    const { error } = await supabase.from("stock_movements").delete().eq("id", rowId).eq("store_id", selectedStoreId).eq("movement_type", movementType);
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
+
+    setRows((prev) => prev.filter((row) => row.id !== rowId));
+    setSelectedRowIds((prev) => prev.filter((id) => id !== rowId));
+    setMsg("Record deleted.");
+  };
+
+  const handleBulkDelete = async () => {
+    if (!selectedStoreId || selectedRowIds.length === 0) return;
+    const confirmed = window.confirm(`Delete ${selectedRowIds.length} record(s)?`);
+    if (!confirmed) return;
+
+    setBulkWorking(true);
+    const { error } = await supabase
+      .from("stock_movements")
+      .delete()
+      .eq("store_id", selectedStoreId)
+      .eq("movement_type", movementType)
+      .in("id", selectedRowIds);
+    setBulkWorking(false);
+
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
+
+    setRows((prev) => prev.filter((row) => !selectedRowIds.includes(row.id)));
+    setSelectedRowIds([]);
+    setMsg("Records deleted.");
+  };
+
+  const handleBulkEdit = async () => {
+    if (!selectedStoreId || selectedRowIds.length === 0) return;
+
+    const patch: Record<string, unknown> = {};
+    if (bulkOccurredOn.trim()) patch.occurred_on = bulkOccurredOn.trim();
+    if (bulkTotalAmount.trim()) {
+      const amount = Number(bulkTotalAmount);
+      if (!Number.isFinite(amount) || amount < 0) return setMsg("Total amount must be 0 or greater.");
+      patch.unit_price = amount;
+    }
+    if (movementType === "sale" && bulkChannel.trim()) patch.channel = bulkChannel.trim();
+    if (bulkCounterparty.trim()) patch.counterparty = bulkCounterparty.trim();
+    if (bulkReference.trim()) patch.reference = bulkReference.trim();
+    if (bulkNotes.trim()) patch.notes = bulkNotes.trim();
+
+    if (Object.keys(patch).length === 0) {
+      setMsg("Fill at least one bulk field.");
+      return;
+    }
+
+    setBulkWorking(true);
+    const { error } = await supabase
+      .from("stock_movements")
+      .update(patch)
+      .eq("store_id", selectedStoreId)
+      .eq("movement_type", movementType)
+      .in("id", selectedRowIds);
+    setBulkWorking(false);
+
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
+
+    setRows((prev) =>
+      prev.map((row) => {
+        if (!selectedRowIds.includes(row.id)) return row;
+        return {
+          ...row,
+          occurred_on: (patch.occurred_on as string | undefined) ?? row.occurred_on,
+          unit_price: (patch.unit_price as number | undefined) ?? row.unit_price,
+          channel: (patch.channel as string | undefined) ?? row.channel,
+          counterparty: (patch.counterparty as string | undefined) ?? row.counterparty,
+          reference: (patch.reference as string | undefined) ?? row.reference,
+          notes: (patch.notes as string | undefined) ?? row.notes,
+        };
+      })
+    );
+
+    setBulkOccurredOn("");
+    setBulkTotalAmount("");
+    setBulkChannel("");
+    setBulkCounterparty("");
+    setBulkReference("");
+    setBulkNotes("");
+    setSelectedRowIds([]);
+    setMsg("Records updated.");
+  };
+
   return (
     <section className="space-y-6">
       <header className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
         <h1 className="text-2xl font-semibold text-slate-900">{pageTitle}</h1>
         <p className="mt-1 text-sm text-slate-500">{pageSubtitle}</p>
 
-        <div className="mt-5 grid gap-4 md:grid-cols-4">
+        <div className="mt-5 grid gap-4 md:grid-cols-5">
           <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
             <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Records (filter)</p>
             <p className="mt-1 text-xl font-semibold text-slate-900">{filteredRows.length}</p>
@@ -551,6 +839,19 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
               ))}
             </select>
           </div>
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Product type</label>
+            <select
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+              value={productTypeFilter}
+              onChange={(e) => setProductTypeFilter(e.target.value as ProductTypeFilter)}
+            >
+              <option value="all">Todos</option>
+              <option value="maquetas">Maquetas</option>
+              <option value="ropa">Ropa</option>
+              <option value="accesorios">Accesorios</option>
+            </select>
+          </div>
         </div>
       </header>
 
@@ -575,9 +876,9 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
                 className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm"
                 value={productId}
                 onChange={(e) => setProductId(e.target.value)}
-                disabled={loadingProducts || products.length === 0}
+                disabled={loadingProducts || filteredProducts.length === 0}
               >
-                {products.map((p) => (
+                {filteredProducts.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.sku} - {p.title || p.name || "Product"}
                   </option>
@@ -598,14 +899,14 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
                 />
               </div>
               <div>
-                <label className="text-sm font-medium text-slate-700">Unit price</label>
+                <label className="text-sm font-medium text-slate-700">Total amount</label>
                 <input
                   type="number"
                   min="0"
                   step="0.01"
                   className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm"
-                  value={unitPrice}
-                  onChange={(e) => setUnitPrice(e.target.value)}
+                  value={totalAmount}
+                  onChange={(e) => setTotalAmount(e.target.value)}
                 />
               </div>
             </div>
@@ -619,6 +920,18 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
                 placeholder={movementType === "purchase" ? "Supplier" : "Customer"}
               />
             </div>
+
+            {movementType === "sale" && (
+              <div>
+                <label className="text-sm font-medium text-slate-700">Channel</label>
+                <input
+                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm"
+                  value={channel}
+                  onChange={(e) => setChannel(e.target.value)}
+                  placeholder="Mercado Libre, Amazon, Instagram..."
+                />
+              </div>
+            )}
 
             <div>
               <label className="text-sm font-medium text-slate-700">Reference</label>
@@ -661,7 +974,9 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
               </button>
             </div>
             <p className="text-xs text-slate-500">
-              Required columns: date, sku, quantity, unit_price. Optional: counterparty, reference, notes.
+              {movementType === "purchase"
+                ? "Required columns: date, sku, quantity, total_amount. Optional: proveedor, reference, notes."
+                : "Required columns: date, sku, quantity, total_amount. Optional: channel, counterparty, reference, notes."}
             </p>
             <input
               className="block w-full text-sm text-slate-700 file:mr-3 file:rounded-full file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-slate-800"
@@ -681,11 +996,32 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
               <p className="mt-1 text-sm text-slate-500">Date, SKU, product, quantity and price.</p>
             </div>
             <div className="flex items-end gap-3">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                <p className="text-xs text-slate-500">{selectedRowIds.length} selected</p>
+                <div className="mt-1 flex gap-2">
+                  <button
+                    type="button"
+                    className="rounded-full border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 disabled:opacity-50"
+                    onClick={handleBulkEdit}
+                    disabled={selectedRowIds.length === 0 || bulkWorking}
+                  >
+                    Bulk edit
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-full border border-rose-200 px-2 py-1 text-xs font-semibold text-rose-700 disabled:opacity-50"
+                    onClick={handleBulkDelete}
+                    disabled={selectedRowIds.length === 0 || bulkWorking}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
               <div>
                 <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Search</label>
                 <input
                   className="mt-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
-                  placeholder="SKU, product, reference"
+                  placeholder="SKU, product, channel, reference"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                 />
@@ -705,6 +1041,50 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
             </div>
           </div>
 
+          <div className="mt-4 grid gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 md:grid-cols-3">
+            <input
+              type="date"
+              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+              value={bulkOccurredOn}
+              onChange={(e) => setBulkOccurredOn(e.target.value)}
+              placeholder="Date"
+            />
+            <input
+              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+              value={bulkTotalAmount}
+              onChange={(e) => setBulkTotalAmount(e.target.value)}
+              placeholder="Total amount"
+            />
+            {movementType === "sale" ? (
+              <input
+                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                value={bulkChannel}
+                onChange={(e) => setBulkChannel(e.target.value)}
+                placeholder="Channel"
+              />
+            ) : (
+              <div />
+            )}
+            <input
+              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+              value={bulkCounterparty}
+              onChange={(e) => setBulkCounterparty(e.target.value)}
+              placeholder={counterpartyLabel}
+            />
+            <input
+              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+              value={bulkReference}
+              onChange={(e) => setBulkReference(e.target.value)}
+              placeholder="Reference"
+            />
+            <input
+              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+              value={bulkNotes}
+              onChange={(e) => setBulkNotes(e.target.value)}
+              placeholder="Notes"
+            />
+          </div>
+
           {loadingRows ? (
             <p className="mt-6 text-sm text-slate-500">Loading records...</p>
           ) : paginatedRows.length === 0 ? (
@@ -716,33 +1096,189 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
               <table className="min-w-full divide-y divide-slate-200 text-sm">
                 <thead>
                   <tr className="text-left text-xs uppercase tracking-wide text-slate-500">
+                    <th className="px-2 py-3">
+                      <input
+                        type="checkbox"
+                        checked={isAllCurrentPageSelected}
+                        onChange={(e) => toggleSelectCurrentPage(e.target.checked)}
+                        aria-label="Select page"
+                      />
+                    </th>
                     <th className="px-2 py-3">Date</th>
                     <th className="px-2 py-3">SKU</th>
                     <th className="px-2 py-3">Product</th>
+                    <th className="px-2 py-3">Type</th>
+                    <th className="px-2 py-3">{getSubtypeLabel(productTypeFilter)}</th>
                     <th className="px-2 py-3">Qty</th>
-                    <th className="px-2 py-3">Unit price</th>
-                    <th className="px-2 py-3">Total</th>
+                    <th className="px-2 py-3">Total amount</th>
+                    {movementType === "sale" && <th className="px-2 py-3">Channel</th>}
                     <th className="px-2 py-3">{counterpartyLabel}</th>
                     <th className="px-2 py-3">Reference</th>
                     <th className="px-2 py-3">Notes</th>
+                    <th className="px-2 py-3">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {paginatedRows.map((row) => {
+                    const isEditing = editingRowId === row.id;
                     const qty = Number(row.quantity || 0);
-                    const price = Number(row.unit_price || 0);
-                    const total = qty * price;
+                    const totalAmountValue = Number(row.unit_price || 0);
                     return (
                       <tr key={row.id} className="text-slate-700">
-                        <td className="px-2 py-3">{row.occurred_on}</td>
+                        <td className="px-2 py-3">
+                          <input
+                            type="checkbox"
+                            checked={selectedRowIds.includes(row.id)}
+                            onChange={(e) => toggleRowSelection(row.id, e.target.checked)}
+                            aria-label={`Select ${row.id}`}
+                          />
+                        </td>
+                        <td className="px-2 py-3">
+                          {isEditing ? (
+                            <input
+                              type="date"
+                              className="rounded-lg border border-slate-200 px-2 py-1"
+                              value={editOccurredOn}
+                              onChange={(e) => setEditOccurredOn(e.target.value)}
+                            />
+                          ) : (
+                            row.occurred_on
+                          )}
+                        </td>
                         <td className="px-2 py-3 font-medium">{getProductSku(row.products)}</td>
-                        <td className="px-2 py-3">{getProductName(row.products)}</td>
-                        <td className="px-2 py-3">{qty.toFixed(2)}</td>
-                        <td className="px-2 py-3">{toCurrency(price)}</td>
-                        <td className="px-2 py-3">{toCurrency(total)}</td>
-                        <td className="px-2 py-3">{row.counterparty || "-"}</td>
-                        <td className="px-2 py-3">{row.reference || "-"}</td>
-                        <td className="px-2 py-3">{row.notes || "-"}</td>
+                        <td className="px-2 py-3">
+                          {isEditing ? (
+                            <select
+                              className="rounded-lg border border-slate-200 px-2 py-1"
+                              value={editProductId}
+                              onChange={(e) => setEditProductId(e.target.value)}
+                            >
+                              {filteredProducts.map((p) => (
+                                <option key={p.id} value={p.id}>
+                                  {p.sku} - {p.title || p.name || "Product"}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            getProductName(row.products)
+                          )}
+                        </td>
+                        <td className="px-2 py-3">{getTypeLabel(getProductType(row.products) ?? "all")}</td>
+                        <td className="px-2 py-3">{getProductSubtype(row.products, productTypeFilter)}</td>
+                        <td className="px-2 py-3">
+                          {isEditing ? (
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              className="w-24 rounded-lg border border-slate-200 px-2 py-1"
+                              value={editQuantity}
+                              onChange={(e) => setEditQuantity(e.target.value)}
+                            />
+                          ) : (
+                            qty.toFixed(2)
+                          )}
+                        </td>
+                        <td className="px-2 py-3">
+                          {isEditing ? (
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              className="w-24 rounded-lg border border-slate-200 px-2 py-1"
+                              value={editTotalAmount}
+                              onChange={(e) => setEditTotalAmount(e.target.value)}
+                            />
+                          ) : (
+                            toCurrency(totalAmountValue)
+                          )}
+                        </td>
+                        {movementType === "sale" && (
+                          <td className="px-2 py-3">
+                            {isEditing ? (
+                              <input
+                                className="w-28 rounded-lg border border-slate-200 px-2 py-1"
+                                value={editChannel}
+                                onChange={(e) => setEditChannel(e.target.value)}
+                              />
+                            ) : (
+                              row.channel || "-"
+                            )}
+                          </td>
+                        )}
+                        <td className="px-2 py-3">
+                          {isEditing ? (
+                            <input
+                              className="w-28 rounded-lg border border-slate-200 px-2 py-1"
+                              value={editCounterparty}
+                              onChange={(e) => setEditCounterparty(e.target.value)}
+                            />
+                          ) : (
+                            row.counterparty || "-"
+                          )}
+                        </td>
+                        <td className="px-2 py-3">
+                          {isEditing ? (
+                            <input
+                              className="w-28 rounded-lg border border-slate-200 px-2 py-1"
+                              value={editReference}
+                              onChange={(e) => setEditReference(e.target.value)}
+                            />
+                          ) : (
+                            row.reference || "-"
+                          )}
+                        </td>
+                        <td className="px-2 py-3">
+                          {isEditing ? (
+                            <input
+                              className="w-28 rounded-lg border border-slate-200 px-2 py-1"
+                              value={editNotes}
+                              onChange={(e) => setEditNotes(e.target.value)}
+                            />
+                          ) : (
+                            row.notes || "-"
+                          )}
+                        </td>
+                        <td className="px-2 py-3">
+                          <div className="flex gap-2">
+                            {isEditing ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="rounded-full bg-slate-900 px-2 py-1 text-xs font-semibold text-white disabled:opacity-50"
+                                  onClick={handleSaveRowEdit}
+                                  disabled={savingEdit}
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  type="button"
+                                  className="rounded-full border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700"
+                                  onClick={cancelEditRow}
+                                >
+                                  Cancel
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  type="button"
+                                  className="rounded-full border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700"
+                                  onClick={() => startEditRow(row)}
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  className="rounded-full border border-rose-200 px-2 py-1 text-xs font-semibold text-rose-700"
+                                  onClick={() => handleDeleteRow(row.id)}
+                                >
+                                  Delete
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </td>
                       </tr>
                     );
                   })}

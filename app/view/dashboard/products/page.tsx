@@ -4,6 +4,9 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabaseBrowser } from "../../../../lib/supabaseBrowser";
 
+type ProductType = "ropa" | "maquetas" | "accesorios";
+type ProductTypeFilter = "all" | ProductType;
+
 type StoreRow = {
   store_id: string;
   stores: { name: string } | { name: string }[] | null;
@@ -20,6 +23,10 @@ type ProductRow = {
   sku: string;
   name?: string | null;
   title: string;
+  product_type: ProductType;
+  escala: string | null;
+  clothing_type: string | null;
+  accessory_type: string | null;
   catchy_phrase: string | null;
   is_active: boolean;
   created_at: string;
@@ -28,9 +35,42 @@ type ProductRow = {
 type CsvProduct = {
   sku: string;
   title: string;
+  product_type: ProductType;
+  escala: string | null;
+  clothing_type: string | null;
+  accessory_type: string | null;
   catchy_phrase: string | null;
   is_active: boolean;
 };
+
+const PRODUCT_TYPES: ProductType[] = ["ropa", "maquetas", "accesorios"];
+
+function getTypeLabel(type: ProductType | ProductTypeFilter): string {
+  if (type === "ropa") return "Ropa";
+  if (type === "maquetas") return "Maquetas";
+  if (type === "accesorios") return "Accesorios";
+  return "Todos";
+}
+
+function getSubtypeLabel(type: ProductTypeFilter): string {
+  if (type === "maquetas") return "Escala";
+  if (type === "ropa") return "Tipo de ropa";
+  if (type === "accesorios") return "Tipo de accesorio";
+  return "Detalle tipo";
+}
+
+function getProductSubtype(product: ProductRow, typeFilter: ProductTypeFilter): string {
+  const targetType = typeFilter === "all" ? product.product_type : typeFilter;
+  if (targetType === "maquetas") return product.escala || "-";
+  if (targetType === "ropa") return product.clothing_type || "-";
+  return product.accessory_type || "-";
+}
+
+function parseProductType(raw: string): ProductType | null {
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "ropa" || normalized === "maquetas" || normalized === "accesorios") return normalized;
+  return null;
+}
 
 function parseDelimitedLine(line: string, delimiter: string): string[] {
   const result: string[] = [];
@@ -77,6 +117,10 @@ function parseCsvProducts(csvText: string): { rows: CsvProduct[]; errors: string
   const header = parseDelimitedLine(lines[0], delimiter).map((v) => v.toLowerCase());
   const skuIndex = header.indexOf("sku");
   const titleIndex = header.indexOf("title");
+  const typeIndex = header.indexOf("product_type");
+  const escalaIndex = header.indexOf("escala");
+  const clothingTypeIndex = header.indexOf("clothing_type");
+  const accessoryTypeIndex = header.indexOf("accessory_type");
   const phraseIndex = header.indexOf("catchy_phrase");
   const activeIndex = header.indexOf("is_active");
 
@@ -92,11 +136,21 @@ function parseCsvProducts(csvText: string): { rows: CsvProduct[]; errors: string
     const cols = parseDelimitedLine(lines[lineNo], delimiter);
     const sku = (cols[skuIndex] || "").trim().toUpperCase();
     const title = (cols[titleIndex] || "").trim();
+    const parsedType = typeIndex >= 0 ? parseProductType(cols[typeIndex] || "") : null;
+    const productType = parsedType ?? "maquetas";
+    const escalaRaw = escalaIndex >= 0 ? (cols[escalaIndex] || "").trim() : "";
+    const clothingRaw = clothingTypeIndex >= 0 ? (cols[clothingTypeIndex] || "").trim() : "";
+    const accessoryRaw = accessoryTypeIndex >= 0 ? (cols[accessoryTypeIndex] || "").trim() : "";
     const phraseRaw = phraseIndex >= 0 ? (cols[phraseIndex] || "").trim() : "";
     const activeRaw = activeIndex >= 0 ? (cols[activeIndex] || "").trim().toLowerCase() : "true";
 
     if (!sku || !title) {
       errors.push(`Fila ${lineNo + 1}: sku y title son obligatorios.`);
+      continue;
+    }
+
+    if (typeIndex >= 0 && !parsedType) {
+      errors.push(`Fila ${lineNo + 1}: product_type invalido. Usa ropa, maquetas o accesorios.`);
       continue;
     }
 
@@ -111,6 +165,10 @@ function parseCsvProducts(csvText: string): { rows: CsvProduct[]; errors: string
     rows.push({
       sku,
       title,
+      product_type: productType,
+      escala: productType === "maquetas" ? escalaRaw || null : null,
+      clothing_type: productType === "ropa" ? clothingRaw || null : null,
+      accessory_type: productType === "accesorios" ? accessoryRaw || null : null,
       catchy_phrase: phraseRaw || null,
       is_active: isActive,
     });
@@ -121,11 +179,16 @@ function parseCsvProducts(csvText: string): { rows: CsvProduct[]; errors: string
 
 function normalizeProductRow(row: Partial<ProductRow> & { id: string; store_id: string }): ProductRow {
   const normalizedTitle = (row.title ?? row.name ?? "").toString();
+  const parsedType = parseProductType((row.product_type ?? "").toString()) ?? "maquetas";
   return {
     id: row.id,
     store_id: row.store_id,
     name: row.name ?? null,
     title: normalizedTitle,
+    product_type: parsedType,
+    escala: row.escala ?? null,
+    clothing_type: row.clothing_type ?? null,
+    accessory_type: row.accessory_type ?? null,
     catchy_phrase: row.catchy_phrase ?? null,
     is_active: Boolean(row.is_active),
     created_at: row.created_at ?? new Date().toISOString(),
@@ -143,24 +206,35 @@ export default function ProductsPage() {
 
   const [sku, setSku] = useState("");
   const [title, setTitle] = useState("");
+  const [productType, setProductType] = useState<ProductType>("maquetas");
+  const [escala, setEscala] = useState("");
+  const [clothingType, setClothingType] = useState("");
+  const [accessoryType, setAccessoryType] = useState("");
   const [catchyPhrase, setCatchyPhrase] = useState("");
   const [isActive, setIsActive] = useState(true);
 
   const [search, setSearch] = useState("");
+  const [productTypeFilter, setProductTypeFilter] = useState<ProductTypeFilter>("all");
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editSku, setEditSku] = useState("");
   const [editTitle, setEditTitle] = useState("");
+  const [editProductType, setEditProductType] = useState<ProductType>("maquetas");
+  const [editEscala, setEditEscala] = useState("");
+  const [editClothingType, setEditClothingType] = useState("");
+  const [editAccessoryType, setEditAccessoryType] = useState("");
   const [editPhrase, setEditPhrase] = useState("");
   const [editActive, setEditActive] = useState(true);
 
   const [pageSize, setPageSize] = useState(10);
   const [page, setPage] = useState(1);
+  const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
 
   const [loadingStores, setLoadingStores] = useState(true);
   const [loadingProducts, setLoadingProducts] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
+  const [bulkWorking, setBulkWorking] = useState(false);
   const [importing, setImporting] = useState(false);
   const [msg, setMsg] = useState("");
   const [csvErrors, setCsvErrors] = useState<string[]>([]);
@@ -225,7 +299,7 @@ export default function ProductsPage() {
       setLoadingProducts(true);
       const { data, error } = await supabase
         .from("products")
-        .select("id,store_id,sku,name,title,catchy_phrase,is_active,created_at")
+        .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,is_active,created_at")
         .eq("store_id", selectedStoreId)
         .order("created_at", { ascending: false });
 
@@ -250,24 +324,39 @@ export default function ProductsPage() {
 
   const filteredProducts = useMemo(() => {
     const term = search.trim().toLowerCase();
-    if (!term) return products;
-    return products.filter((p) => p.sku.toLowerCase().includes(term) || p.title.toLowerCase().includes(term));
-  }, [products, search]);
+    return products.filter((p) => {
+      const typeMatch = productTypeFilter === "all" ? true : p.product_type === productTypeFilter;
+      const textMatch =
+        !term ||
+        p.sku.toLowerCase().includes(term) ||
+        p.title.toLowerCase().includes(term) ||
+        getProductSubtype(p, "all").toLowerCase().includes(term);
+      return typeMatch && textMatch;
+    });
+  }, [products, search, productTypeFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filteredProducts.length / pageSize));
 
   useEffect(() => {
     setPage(1);
-  }, [selectedStoreId, search, pageSize]);
+  }, [selectedStoreId, search, pageSize, productTypeFilter]);
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
   }, [page, totalPages]);
 
+  useEffect(() => {
+    setSelectedProductIds([]);
+  }, [selectedStoreId]);
+
   const paginatedProducts = useMemo(() => {
     const start = (page - 1) * pageSize;
     return filteredProducts.slice(start, start + pageSize);
   }, [filteredProducts, page, pageSize]);
+
+  const isAllCurrentPageSelected = useMemo(() => {
+    return paginatedProducts.length > 0 && paginatedProducts.every((p) => selectedProductIds.includes(p.id));
+  }, [paginatedProducts, selectedProductIds]);
 
   const stats = useMemo(() => {
     const total = filteredProducts.length;
@@ -277,9 +366,10 @@ export default function ProductsPage() {
 
   const downloadCsvTemplate = () => {
     const sample = [
-      "sku,title,catchy_phrase,is_active",
-      "GASEOSA-600ML,Gaseosa Cola 600ml,Refrescante y ligera,true",
-      "GALLETA-CHOCO,Galleta Chocolate,,true",
+      "sku,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,is_active",
+      "MODEL-737,Maqueta B737,maquetas,1:400,,,Jet clasico,true",
+      "CAMI-NEGRA,Camiseta Negra,ropa,,Camiseta,,Algodon premium,true",
+      "CASE-LOGO,Accesorio Logo,accesorios,,,Llavero,Edicion limitada,true",
     ].join("\n");
 
     const blob = new Blob([sample], { type: "text/csv;charset=utf-8;" });
@@ -304,6 +394,9 @@ export default function ProductsPage() {
     const skuValue = sku.trim().toUpperCase();
     const titleValue = title.trim();
     const phraseValue = catchyPhrase.trim();
+    const escalaValue = productType === "maquetas" ? escala.trim() : "";
+    const clothingTypeValue = productType === "ropa" ? clothingType.trim() : "";
+    const accessoryTypeValue = productType === "accesorios" ? accessoryType.trim() : "";
 
     if (!skuValue || !titleValue) {
       setMsg("SKU y titulo son obligatorios.");
@@ -318,10 +411,14 @@ export default function ProductsPage() {
         sku: skuValue,
         name: titleValue,
         title: titleValue,
+        product_type: productType,
+        escala: escalaValue || null,
+        clothing_type: clothingTypeValue || null,
+        accessory_type: accessoryTypeValue || null,
         catchy_phrase: phraseValue || null,
         is_active: isActive,
       })
-      .select("id,store_id,sku,name,title,catchy_phrase,is_active,created_at")
+      .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,is_active,created_at")
       .single();
     setSaving(false);
 
@@ -333,6 +430,10 @@ export default function ProductsPage() {
     setProducts((prev) => [normalizeProductRow(data as ProductRow), ...prev]);
     setSku("");
     setTitle("");
+    setProductType("maquetas");
+    setEscala("");
+    setClothingType("");
+    setAccessoryType("");
     setCatchyPhrase("");
     setIsActive(true);
     setMsg("Producto creado.");
@@ -342,6 +443,10 @@ export default function ProductsPage() {
     setEditingId(product.id);
     setEditSku(product.sku);
     setEditTitle(product.title);
+    setEditProductType(product.product_type);
+    setEditEscala(product.escala || "");
+    setEditClothingType(product.clothing_type || "");
+    setEditAccessoryType(product.accessory_type || "");
     setEditPhrase(product.catchy_phrase || "");
     setEditActive(product.is_active);
     setMsg("");
@@ -352,6 +457,10 @@ export default function ProductsPage() {
     setEditingId(null);
     setEditSku("");
     setEditTitle("");
+    setEditProductType("maquetas");
+    setEditEscala("");
+    setEditClothingType("");
+    setEditAccessoryType("");
     setEditPhrase("");
     setEditActive(true);
   };
@@ -362,6 +471,9 @@ export default function ProductsPage() {
     const skuValue = editSku.trim().toUpperCase();
     const titleValue = editTitle.trim();
     const phraseValue = editPhrase.trim();
+    const escalaValue = editProductType === "maquetas" ? editEscala.trim() : "";
+    const clothingTypeValue = editProductType === "ropa" ? editClothingType.trim() : "";
+    const accessoryTypeValue = editProductType === "accesorios" ? editAccessoryType.trim() : "";
 
     if (!skuValue || !titleValue) {
       setMsg("SKU y titulo son obligatorios.");
@@ -375,12 +487,16 @@ export default function ProductsPage() {
         sku: skuValue,
         name: titleValue,
         title: titleValue,
+        product_type: editProductType,
+        escala: escalaValue || null,
+        clothing_type: clothingTypeValue || null,
+        accessory_type: accessoryTypeValue || null,
         catchy_phrase: phraseValue || null,
         is_active: editActive,
       })
       .eq("id", editingId)
       .eq("store_id", selectedStoreId)
-      .select("id,store_id,sku,name,title,catchy_phrase,is_active,created_at")
+      .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,is_active,created_at")
       .single();
     setSavingEdit(false);
 
@@ -402,7 +518,7 @@ export default function ProductsPage() {
       .update({ is_active: false })
       .eq("id", product.id)
       .eq("store_id", selectedStoreId)
-      .select("id,store_id,sku,name,title,catchy_phrase,is_active,created_at")
+      .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,is_active,created_at")
       .single();
 
     if (error) {
@@ -451,6 +567,10 @@ export default function ProductsPage() {
       sku: row.sku,
       name: row.title,
       title: row.title,
+      product_type: row.product_type,
+      escala: row.escala,
+      clothing_type: row.clothing_type,
+      accessory_type: row.accessory_type,
       catchy_phrase: row.catchy_phrase,
       is_active: row.is_active,
     }));
@@ -473,7 +593,7 @@ export default function ProductsPage() {
 
     const { data, error } = await supabase
       .from("products")
-      .select("id,store_id,sku,name,title,catchy_phrase,is_active,created_at")
+      .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,is_active,created_at")
       .eq("store_id", selectedStoreId)
       .order("created_at", { ascending: false });
 
@@ -489,13 +609,70 @@ export default function ProductsPage() {
     setMsg(`Importacion completa: ${parsed.rows.length} filas procesadas.`);
   };
 
+  const toggleProductSelection = (productId: string, checked: boolean) => {
+    setSelectedProductIds((prev) => {
+      if (checked) return prev.includes(productId) ? prev : [...prev, productId];
+      return prev.filter((id) => id !== productId);
+    });
+  };
+
+  const toggleSelectCurrentPage = (checked: boolean) => {
+    const pageIds = paginatedProducts.map((p) => p.id);
+    if (checked) {
+      setSelectedProductIds((prev) => Array.from(new Set([...prev, ...pageIds])));
+      return;
+    }
+    setSelectedProductIds((prev) => prev.filter((id) => !pageIds.includes(id)));
+  };
+
+  const handleBulkSetActive = async (nextActive: boolean) => {
+    if (!selectedStoreId || selectedProductIds.length === 0) return;
+    setMsg("");
+    setBulkWorking(true);
+    const { error } = await supabase
+      .from("products")
+      .update({ is_active: nextActive })
+      .eq("store_id", selectedStoreId)
+      .in("id", selectedProductIds);
+    setBulkWorking(false);
+
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
+
+    setProducts((prev) => prev.map((p) => (selectedProductIds.includes(p.id) ? { ...p, is_active: nextActive } : p)));
+    setMsg(nextActive ? "Productos activados." : "Productos desactivados.");
+    setSelectedProductIds([]);
+  };
+
+  const handleBulkDelete = async () => {
+    if (!selectedStoreId || selectedProductIds.length === 0) return;
+    const confirmed = window.confirm(`Eliminar ${selectedProductIds.length} producto(s)? Esta accion es permanente.`);
+    if (!confirmed) return;
+
+    setMsg("");
+    setBulkWorking(true);
+    const { error } = await supabase.from("products").delete().eq("store_id", selectedStoreId).in("id", selectedProductIds);
+    setBulkWorking(false);
+
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
+
+    setProducts((prev) => prev.filter((p) => !selectedProductIds.includes(p.id)));
+    setMsg("Productos eliminados.");
+    setSelectedProductIds([]);
+  };
+
   return (
     <section className="space-y-6">
       <header className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
         <h1 className="text-2xl font-semibold text-slate-900">Productos</h1>
         <p className="mt-1 text-sm text-slate-500">Crea y administra tu catalogo de productos por tienda.</p>
 
-        <div className="mt-5 grid gap-4 md:grid-cols-4">
+        <div className="mt-5 grid gap-4 md:grid-cols-5">
           <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
             <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Productos (filtro)</p>
             <p className="mt-1 text-xl font-semibold text-slate-900">{stats.total}</p>
@@ -515,6 +692,21 @@ export default function ProductsPage() {
               {stores.map((store) => (
                 <option key={store.id} value={store.id}>
                   {store.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Tipo</label>
+            <select
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+              value={productTypeFilter}
+              onChange={(e) => setProductTypeFilter(e.target.value as ProductTypeFilter)}
+            >
+              <option value="all">Todos</option>
+              {PRODUCT_TYPES.map((type) => (
+                <option key={type} value={type}>
+                  {getTypeLabel(type)}
                 </option>
               ))}
             </select>
@@ -558,6 +750,57 @@ export default function ProductsPage() {
             </div>
 
             <div>
+              <label className="text-sm font-medium text-slate-700">Tipo de producto</label>
+              <select
+                className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                value={productType}
+                onChange={(e) => setProductType(e.target.value as ProductType)}
+              >
+                {PRODUCT_TYPES.map((type) => (
+                  <option key={type} value={type}>
+                    {getTypeLabel(type)}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {productType === "maquetas" && (
+              <div>
+                <label className="text-sm font-medium text-slate-700">Escala</label>
+                <input
+                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                  value={escala}
+                  onChange={(e) => setEscala(e.target.value)}
+                  placeholder="Ej. 1:400"
+                />
+              </div>
+            )}
+
+            {productType === "ropa" && (
+              <div>
+                <label className="text-sm font-medium text-slate-700">Tipo de ropa</label>
+                <input
+                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                  value={clothingType}
+                  onChange={(e) => setClothingType(e.target.value)}
+                  placeholder="Ej. Camiseta"
+                />
+              </div>
+            )}
+
+            {productType === "accesorios" && (
+              <div>
+                <label className="text-sm font-medium text-slate-700">Tipo de accesorio</label>
+                <input
+                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                  value={accessoryType}
+                  onChange={(e) => setAccessoryType(e.target.value)}
+                  placeholder="Ej. Llavero"
+                />
+              </div>
+            )}
+
+            <div>
               <label className="text-sm font-medium text-slate-700">Frase comercial</label>
               <input
                 className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
@@ -592,7 +835,9 @@ export default function ProductsPage() {
                 Descargar plantilla
               </button>
             </div>
-            <p className="text-xs text-slate-500">Columnas requeridas: sku,title. Opcionales: catchy_phrase,is_active</p>
+            <p className="text-xs text-slate-500">
+              Requeridas: sku,title. Opcionales: product_type, escala, clothing_type, accessory_type, catchy_phrase, is_active.
+            </p>
             <input
               className="block w-full text-sm text-slate-700 file:mr-3 file:rounded-full file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-slate-800"
               type="file"
@@ -610,7 +855,35 @@ export default function ProductsPage() {
               <h2 className="text-lg font-semibold text-slate-900">Catalogo</h2>
               <p className="mt-1 text-sm text-slate-500">Lista de productos registrados para la tienda seleccionada.</p>
             </div>
-            <div>
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium text-slate-500">{selectedProductIds.length} seleccionados</span>
+                <button
+                  type="button"
+                  className="rounded-full border border-emerald-200 px-3 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+                  onClick={() => handleBulkSetActive(true)}
+                  disabled={selectedProductIds.length === 0 || bulkWorking}
+                >
+                  Activar
+                </button>
+                <button
+                  type="button"
+                  className="rounded-full border border-amber-200 px-3 py-1 text-xs font-semibold text-amber-700 hover:bg-amber-50 disabled:opacity-50"
+                  onClick={() => handleBulkSetActive(false)}
+                  disabled={selectedProductIds.length === 0 || bulkWorking}
+                >
+                  Desactivar
+                </button>
+                <button
+                  type="button"
+                  className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                  onClick={handleBulkDelete}
+                  disabled={selectedProductIds.length === 0 || bulkWorking}
+                >
+                  Eliminar
+                </button>
+              </div>
+              <div>
               <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Por pagina</label>
               <select
                 className="ml-2 rounded-xl border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700"
@@ -621,6 +894,7 @@ export default function ProductsPage() {
                 <option value={25}>25</option>
                 <option value={50}>50</option>
               </select>
+              </div>
             </div>
           </div>
 
@@ -635,8 +909,18 @@ export default function ProductsPage() {
               <table className="min-w-full divide-y divide-slate-200 text-sm">
                 <thead>
                   <tr className="text-left text-xs uppercase tracking-wide text-slate-500">
+                    <th className="px-2 py-3">
+                      <input
+                        type="checkbox"
+                        checked={isAllCurrentPageSelected}
+                        onChange={(e) => toggleSelectCurrentPage(e.target.checked)}
+                        aria-label="Seleccionar pagina"
+                      />
+                    </th>
                     <th className="px-2 py-3">SKU</th>
                     <th className="px-2 py-3">Titulo</th>
+                    <th className="px-2 py-3">Tipo</th>
+                    <th className="px-2 py-3">{getSubtypeLabel(productTypeFilter)}</th>
                     <th className="px-2 py-3">Frase comercial</th>
                     <th className="px-2 py-3">Estado</th>
                     <th className="px-2 py-3">Acciones</th>
@@ -648,6 +932,14 @@ export default function ProductsPage() {
 
                     return (
                       <tr key={product.id} className="text-slate-700">
+                        <td className="px-2 py-3">
+                          <input
+                            type="checkbox"
+                            checked={selectedProductIds.includes(product.id)}
+                            onChange={(e) => toggleProductSelection(product.id, e.target.checked)}
+                            aria-label={`Seleccionar ${product.sku}`}
+                          />
+                        </td>
                         <td className="px-2 py-3 font-medium">
                           {isEditing ? (
                             <input
@@ -668,6 +960,48 @@ export default function ProductsPage() {
                             />
                           ) : (
                             product.title
+                          )}
+                        </td>
+                        <td className="px-2 py-3">
+                          {isEditing ? (
+                            <select
+                              className="w-36 rounded-lg border border-slate-200 px-2 py-1"
+                              value={editProductType}
+                              onChange={(e) => setEditProductType(e.target.value as ProductType)}
+                            >
+                              {PRODUCT_TYPES.map((type) => (
+                                <option key={type} value={type}>
+                                  {getTypeLabel(type)}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            getTypeLabel(product.product_type)
+                          )}
+                        </td>
+                        <td className="px-2 py-3">
+                          {isEditing ? (
+                            editProductType === "maquetas" ? (
+                              <input
+                                className="w-36 rounded-lg border border-slate-200 px-2 py-1"
+                                value={editEscala}
+                                onChange={(e) => setEditEscala(e.target.value)}
+                              />
+                            ) : editProductType === "ropa" ? (
+                              <input
+                                className="w-36 rounded-lg border border-slate-200 px-2 py-1"
+                                value={editClothingType}
+                                onChange={(e) => setEditClothingType(e.target.value)}
+                              />
+                            ) : (
+                              <input
+                                className="w-36 rounded-lg border border-slate-200 px-2 py-1"
+                                value={editAccessoryType}
+                                onChange={(e) => setEditAccessoryType(e.target.value)}
+                              />
+                            )
+                          ) : (
+                            getProductSubtype(product, productTypeFilter)
                           )}
                         </td>
                         <td className="px-2 py-3">
