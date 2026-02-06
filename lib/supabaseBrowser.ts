@@ -13,5 +13,3 @@ export function supabaseBrowser() {
     }
   );
 }
-
-prueba
