@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabaseBrowser } from "../../../../lib/supabaseBrowser";
 
@@ -45,6 +45,16 @@ type MovementRow = {
   products: ProductRow | ProductRow[] | null;
 };
 
+type CsvMovementInput = {
+  occurred_on: string;
+  sku: string;
+  quantity: number;
+  unit_price: number;
+  counterparty: string | null;
+  reference: string | null;
+  notes: string | null;
+};
+
 function getProductName(product: ProductRow | ProductRow[] | null): string {
   const p = Array.isArray(product) ? product[0] : product;
   if (!p) return "-";
@@ -58,6 +68,103 @@ function getProductSku(product: ProductRow | ProductRow[] | null): string {
 
 function toCurrency(value: number): string {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value);
+}
+
+function parseDelimitedLine(line: string, delimiter: string): string[] {
+  const result: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    if (char === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === delimiter && !inQuotes) {
+      result.push(current.trim());
+      current = "";
+      continue;
+    }
+
+    current += char;
+  }
+
+  result.push(current.trim());
+  return result;
+}
+
+function parseCsvMovements(text: string): { rows: CsvMovementInput[]; errors: string[] } {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  if (lines.length === 0) {
+    return { rows: [], errors: ["CSV vacio."] };
+  }
+
+  const delimiter = lines[0].includes("\t") ? "\t" : lines[0].includes(";") ? ";" : ",";
+  const header = parseDelimitedLine(lines[0], delimiter).map((v) => v.toLowerCase());
+
+  const dateIdx = header.indexOf("date") >= 0 ? header.indexOf("date") : header.indexOf("occurred_on");
+  const skuIdx = header.indexOf("sku");
+  const qtyIdx = header.indexOf("quantity") >= 0 ? header.indexOf("quantity") : header.indexOf("qty");
+  const priceIdx = header.indexOf("unit_price") >= 0 ? header.indexOf("unit_price") : header.indexOf("price");
+  const cpIdx = header.indexOf("counterparty");
+  const refIdx = header.indexOf("reference");
+  const notesIdx = header.indexOf("notes");
+
+  if (dateIdx < 0 || skuIdx < 0 || qtyIdx < 0 || priceIdx < 0) {
+    return {
+      rows: [],
+      errors: ["El archivo debe incluir: date, sku, quantity, unit_price (acepta CSV o TSV)."],
+    };
+  }
+
+  const rows: CsvMovementInput[] = [];
+  const errors: string[] = [];
+
+  for (let i = 1; i < lines.length; i += 1) {
+    const cols = parseDelimitedLine(lines[i], delimiter);
+    const occurred_on = (cols[dateIdx] || "").trim();
+    const sku = (cols[skuIdx] || "").trim().toUpperCase();
+    const qtyRaw = (cols[qtyIdx] || "").trim();
+    const priceRaw = (cols[priceIdx] || "").trim();
+    const quantity = Number(qtyRaw);
+    const unit_price = Number(priceRaw);
+
+    if (!occurred_on || !sku || !qtyRaw || !priceRaw) {
+      errors.push(`Fila ${i + 1}: date, sku, quantity y unit_price son obligatorios.`);
+      continue;
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      errors.push(`Fila ${i + 1}: quantity debe ser mayor a 0.`);
+      continue;
+    }
+    if (!Number.isFinite(unit_price) || unit_price < 0) {
+      errors.push(`Fila ${i + 1}: unit_price debe ser 0 o mayor.`);
+      continue;
+    }
+
+    rows.push({
+      occurred_on,
+      sku,
+      quantity,
+      unit_price,
+      counterparty: cpIdx >= 0 ? (cols[cpIdx] || "").trim() || null : null,
+      reference: refIdx >= 0 ? (cols[refIdx] || "").trim() || null : null,
+      notes: notesIdx >= 0 ? (cols[notesIdx] || "").trim() || null : null,
+    });
+  }
+
+  return { rows, errors };
 }
 
 export default function StockMovementsPage(props: StockMovementsPageProps) {
@@ -87,7 +194,9 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
   const [loadingProducts, setLoadingProducts] = useState(false);
   const [loadingRows, setLoadingRows] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [msg, setMsg] = useState("");
+  const [csvErrors, setCsvErrors] = useState<string[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -250,6 +359,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault();
     setMsg("");
+    setCsvErrors([]);
 
     if (!selectedStoreId) return setMsg("Select a store.");
     if (!productId) return setMsg("Select a product.");
@@ -293,6 +403,118 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     setCounterparty("");
     setNotes("");
     setMsg(movementType === "purchase" ? "Purchase added." : "Sale added.");
+  };
+
+  const downloadCsvTemplate = () => {
+    const sample = [
+      "date,sku,quantity,unit_price,counterparty,reference,notes",
+      movementType === "purchase"
+        ? "2026-02-06,AAS-TEST-001,10,25.50,Supplier XYZ,INV-1001,Initial stock"
+        : "2026-02-06,AAS-TEST-001,2,39.99,Customer ABC,SO-2001,Online sale",
+    ].join("\n");
+
+    const blob = new Blob([sample], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = movementType === "purchase" ? "plantilla_compras.csv" : "plantilla_ventas.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImportCsv = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setMsg("");
+    setCsvErrors([]);
+
+    if (!selectedStoreId) {
+      setMsg("Select a store before importing.");
+      e.target.value = "";
+      return;
+    }
+
+    setImporting(true);
+    const text = await file.text();
+    const parsed = parseCsvMovements(text);
+
+    if (parsed.errors.length > 0) {
+      setImporting(false);
+      setCsvErrors(parsed.errors);
+      setMsg(`CSV invalido: ${parsed.errors.length} errores.`);
+      e.target.value = "";
+      return;
+    }
+    if (parsed.rows.length === 0) {
+      setImporting(false);
+      setMsg("No valid rows to import.");
+      e.target.value = "";
+      return;
+    }
+
+    const skuToProductId = new Map(products.map((p) => [p.sku.toUpperCase(), p.id]));
+    const missingSkuErrors: string[] = [];
+    const payload = parsed.rows
+      .map((row, index) => {
+        const product_id = skuToProductId.get(row.sku);
+        if (!product_id) {
+          missingSkuErrors.push(`Fila ${index + 2}: sku no existe en la tienda (${row.sku}).`);
+          return null;
+        }
+        return {
+          store_id: selectedStoreId,
+          product_id,
+          movement_type: movementType,
+          quantity: row.quantity,
+          unit_price: row.unit_price,
+          occurred_on: row.occurred_on,
+          counterparty: row.counterparty,
+          reference: row.reference,
+          notes: row.notes,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => Boolean(x));
+
+    if (missingSkuErrors.length > 0) {
+      setImporting(false);
+      setCsvErrors(missingSkuErrors);
+      setMsg(`CSV invalido: ${missingSkuErrors.length} SKU(s) no encontrados.`);
+      e.target.value = "";
+      return;
+    }
+
+    const chunkSize = 500;
+    for (let start = 0; start < payload.length; start += chunkSize) {
+      const chunk = payload.slice(start, start + chunkSize);
+      const { error } = await supabase.from("stock_movements").insert(chunk);
+      if (error) {
+        setImporting(false);
+        setMsg(error.message);
+        e.target.value = "";
+        return;
+      }
+    }
+
+    const { data, error } = await supabase
+      .from("stock_movements")
+      .select(
+        "id,store_id,product_id,movement_type,quantity,unit_price,occurred_on,reference,counterparty,notes,created_at,products(id,sku,name,title)"
+      )
+      .eq("store_id", selectedStoreId)
+      .eq("movement_type", movementType)
+      .order("occurred_on", { ascending: false })
+      .order("created_at", { ascending: false });
+
+    setImporting(false);
+    e.target.value = "";
+
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
+
+    setRows((data ?? []) as MovementRow[]);
+    setMsg(`Import complete: ${payload.length} rows processed.`);
   };
 
   return (
@@ -426,6 +648,30 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
               {saving ? "Saving..." : movementType === "purchase" ? "Add purchase" : "Add sale"}
             </button>
           </form>
+
+          <div className="mt-6 border-t border-slate-200 pt-5 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-sm font-semibold text-slate-900">Import CSV</h3>
+              <button
+                type="button"
+                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-indigo-200 hover:text-indigo-700"
+                onClick={downloadCsvTemplate}
+              >
+                Download template
+              </button>
+            </div>
+            <p className="text-xs text-slate-500">
+              Required columns: date, sku, quantity, unit_price. Optional: counterparty, reference, notes.
+            </p>
+            <input
+              className="block w-full text-sm text-slate-700 file:mr-3 file:rounded-full file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-slate-800"
+              type="file"
+              accept=".csv,text/csv"
+              onChange={handleImportCsv}
+              disabled={importing || !selectedStoreId}
+            />
+            {importing && <p className="text-xs text-slate-500">Importing...</p>}
+          </div>
         </article>
 
         <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -532,6 +778,19 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
       </div>
 
       {msg && <p className="text-sm text-slate-600">{msg}</p>}
+
+      {csvErrors.length > 0 && (
+        <section className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
+          <h3 className="text-sm font-semibold text-rose-800">CSV errors ({csvErrors.length})</h3>
+          <div className="mt-2 max-h-48 overflow-auto rounded-lg border border-rose-200 bg-white p-3">
+            <ul className="space-y-1 text-xs text-rose-700">
+              {csvErrors.map((error, idx) => (
+                <li key={`${idx}-${error}`}>{error}</li>
+              ))}
+            </ul>
+          </div>
+        </section>
+      )}
     </section>
   );
 }
