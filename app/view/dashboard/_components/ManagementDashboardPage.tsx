@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { DayPicker, type DateRange } from "react-day-picker";
 import "react-day-picker/dist/style.css";
@@ -57,6 +57,7 @@ export default function ManagementDashboardPage() {
   const [monthYear, setMonthYear] = useState(new Date().getFullYear());
   const [openCal, setOpenCal] = useState(false);
   const [openMonth, setOpenMonth] = useState(false);
+  const filterPopoverRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let dead = false;
@@ -88,6 +89,20 @@ export default function ManagementDashboardPage() {
     if (g === "monthly" && !monthRange.from && !monthRange.to) setMonthRange({ from: trend[0].key, to: trend[trend.length - 1].key });
   }, [trend, g, dayRange, weekRange, monthRange.from, monthRange.to]);
 
+  useEffect(() => {
+    if (!openCal && !openMonth) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const node = filterPopoverRef.current;
+      if (!node) return;
+      if (event.target instanceof Node && !node.contains(event.target)) {
+        setOpenCal(false);
+        setOpenMonth(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [openCal, openMonth]);
+
   const shown = useMemo(() => {
     if (g === "daily") {
       const a = dayRange?.from?.getTime() ?? -Infinity; const b = dayRange?.to?.getTime() ?? Infinity;
@@ -112,21 +127,46 @@ export default function ManagementDashboardPage() {
     return { total, units, today, week, month, wp: pct(week, prevW), mp: pct(month, prevM) };
   }, [rows]);
 
+  const filteredSalesRows = useMemo(() => {
+    if (g === "daily") {
+      const a = dayRange?.from?.getTime() ?? -Infinity;
+      const b = dayRange?.to?.getTime() ?? Infinity;
+      return rows.filter((r) => {
+        const t = toDate(r.occurred_on).getTime();
+        return t >= a && t <= b;
+      });
+    }
+    if (g === "weekly") {
+      const a = weekRange?.from?.getTime() ?? -Infinity;
+      const b = weekRange?.to?.getTime() ?? Infinity;
+      return rows.filter((r) => {
+        const t = toDate(r.occurred_on).getTime();
+        return t >= a && t <= b;
+      });
+    }
+    const a = monthRange.from ? monthVal(monthRange.from) : -Infinity;
+    const b = monthRange.to ? monthVal(monthRange.to) : Infinity;
+    return rows.filter((r) => {
+      const t = monthVal(monthKey(toDate(r.occurred_on)));
+      return t >= a && t <= b;
+    });
+  }, [rows, g, dayRange, weekRange, monthRange]);
+
   const topProducts = useMemo(() => {
     const m = new Map<string, { name: string; units: number; revenue: number }>();
-    rows.forEach((r) => {
+    filteredSalesRows.forEach((r) => {
       const p = Array.isArray(r.products) ? r.products[0] : r.products;
       const cur = m.get(r.product_id) || { name: p?.title || p?.name || "Unknown product", units: 0, revenue: 0 };
       cur.units += Number(r.quantity || 0); cur.revenue += Number(r.unit_price || 0); m.set(r.product_id, cur);
     });
     return Array.from(m.values()).sort((a,b)=>b.units-a.units).slice(0,8);
-  }, [rows]);
+  }, [filteredSalesRows]);
 
   const channels = useMemo(() => {
     const m = new Map<string, number>();
-    rows.forEach((r) => { const k = (r.channel || "Direct").trim() || "Direct"; m.set(k, (m.get(k) || 0) + Number(r.unit_price || 0)); });
+    filteredSalesRows.forEach((r) => { const k = (r.channel || "Direct").trim() || "Direct"; m.set(k, (m.get(k) || 0) + Number(r.unit_price || 0)); });
     return Array.from(m.entries()).map(([channel,revenue])=>({channel,revenue})).sort((a,b)=>b.revenue-a.revenue).slice(0,5);
-  }, [rows]);
+  }, [filteredSalesRows]);
 
   const maxRev = Math.max(1, ...shown.map((p) => p.revenue));
   const maxUnits = Math.max(1, ...shown.map((p) => p.units));
@@ -138,6 +178,8 @@ export default function ManagementDashboardPage() {
   const dayLbl = !dayRange?.from && !dayRange?.to ? "Select date range" : `${new Intl.DateTimeFormat("en-GB").format(dayRange?.from || new Date())}${dayRange?.to ? ` - ${new Intl.DateTimeFormat("en-GB").format(dayRange.to)}` : " - ..."}`;
   const weekLbl = !weekRange?.from && !weekRange?.to ? "Select week range" : `${new Intl.DateTimeFormat("en-GB").format(weekRange?.from || new Date())}${weekRange?.to ? ` - ${new Intl.DateTimeFormat("en-GB").format(weekRange.to)}` : " - ..."}`;
   const monthLbl = !monthRange.from && !monthRange.to ? "Select month range" : `${monthRange.from ? monthLabel(monthRange.from) : "..."}${monthRange.to ? ` - ${monthLabel(monthRange.to)}` : " - ..."}`;
+  const activeModeLabel = g === "daily" ? "Daily" : g === "weekly" ? "Weekly" : "Monthly";
+  const hasActiveFilter = g === "daily" ? Boolean(dayRange?.from || dayRange?.to) : g === "weekly" ? Boolean(weekRange?.from || weekRange?.to) : Boolean(monthRange.from || monthRange.to);
 
   if (loading) return <p className="rounded-3xl border border-slate-200 bg-white p-6 text-sm text-slate-500">Loading dashboard...</p>;
 
@@ -160,25 +202,31 @@ export default function ManagementDashboardPage() {
         <article className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm"><p className="text-xs uppercase tracking-wide text-slate-500">All-time Sales</p><p className="mt-2 text-2xl font-semibold text-slate-900">{eur(summary.total)}</p><p className="mt-1 text-xs text-slate-500">{compact(summary.units)} units sold</p></article>
       </section>
 
-      <section className="grid gap-6 lg:grid-cols-[2fr_1fr]">
-        <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold text-slate-900">Trend Explorer</h2><p className="mt-1 text-sm text-slate-500">Bars: revenue. Line: products sold. Hover for exact values.</p></div><div className="flex rounded-full border border-slate-200 bg-slate-50 p-1">{(["daily","weekly","monthly"] as G[]).map((x)=><button key={x} type="button" onClick={()=>{setG(x);setOpenCal(false);setOpenMonth(false);}} className={x===g?"rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white":"rounded-full px-3 py-1 text-xs font-semibold text-slate-600 hover:text-slate-900"}>{x}</button>)}</div></div>
-
-          <div className="relative mt-4">
-            {g !== "monthly" ? (<><button type="button" className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-left text-sm text-slate-700" onClick={()=>setOpenCal((p)=>!p)}>{g==="daily"?dayLbl:weekLbl}</button>{openCal && <div className="absolute z-20 mt-2 rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">{g==="daily" ? <DayPicker mode="range" numberOfMonths={1} className="text-sm" selected={dayRange} onSelect={(r,s)=>{if(!s)return; if(dayRange?.from&&dayRange?.to){setDayRange({from:s,to:undefined});return;} setDayRange(r); if(r?.from&&r?.to) setOpenCal(false);}}/> : <DayPicker mode="range" numberOfMonths={1} className="text-sm" showWeekNumber selected={weekRange} onSelect={(r,s)=>{if(!s)return; if(weekRange?.from&&weekRange?.to){const a=wkStart(s);setWeekRange({from:a,to:addDays(a,6)});setOpenCal(false);return;} const a=wkStart(r?.from||s); const b=r?.to?addDays(wkStart(r.to),6):undefined; setWeekRange({from:a,to:b}); if(b) setOpenCal(false);}}/>}<div className="mt-2 flex justify-between"><button type="button" className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700" onClick={()=>g==="daily"?setDayRange(undefined):setWeekRange(undefined)}>Clear</button><button type="button" className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700" onClick={()=>setOpenCal(false)}>Close</button></div></div>}</>) : (<><button type="button" className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-left text-sm text-slate-700" onClick={()=>setOpenMonth((p)=>!p)}>{monthLbl}</button>{openMonth && <div className="absolute z-20 mt-2 w-full rounded-2xl border border-slate-200 bg-white p-3 shadow-xl"><div className="mb-3 flex items-center justify-between"><button type="button" className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700" onClick={()=>setMonthYear((y)=>y-1)}>Prev year</button><p className="text-sm font-semibold text-slate-800">{monthYear}</p><button type="button" className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700" onClick={()=>setMonthYear((y)=>y+1)}>Next year</button></div><div className="grid grid-cols-3 gap-2">{["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"].map((m,i)=>{const k=`${monthYear}-${String(i+1).padStart(2,"0")}`; const f=monthRange.from||""; const t=monthRange.to||""; const inR=f&&t&&monthVal(k)>=monthVal(f)&&monthVal(k)<=monthVal(t); const edge=k===f||k===t; return <button key={k} type="button" className={edge?"rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-white":inR?"rounded-xl bg-slate-200 px-3 py-2 text-xs font-semibold text-slate-800":"rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"} onClick={()=>{if(!monthRange.from||(monthRange.from&&monthRange.to)){setMonthRange({from:k,to:undefined});return;} if(monthVal(k)<monthVal(monthRange.from)){setMonthRange({from:k,to:undefined});return;} setMonthRange({from:monthRange.from,to:k});}}>{m}</button>;})}</div><div className="mt-3 flex justify-between"><button type="button" className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700" onClick={()=>setMonthRange({})}>Clear</button><button type="button" className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700" onClick={()=>setOpenMonth(false)}>Close</button></div></div>}</>) }
-          </div>
-
-          <div className="relative mt-5 rounded-2xl border border-slate-100 bg-slate-50 p-3">{hovered && <div className="absolute left-4 top-4 z-10 rounded-xl border border-slate-200 bg-white/95 px-3 py-2 text-xs shadow"><p className="font-semibold text-slate-800">{hovered.label}</p><p className="text-slate-600">Revenue: {eur(hovered.revenue)}</p><p className="text-slate-600">Units: {hovered.units.toFixed(0)}</p></div>}<svg viewBox={`0 0 ${w} ${h}`} className="h-[320px] w-full" onMouseLeave={()=>setHover(null)}>{[0,1,2,3,4].map((i)=><line key={i} x1={x0} y1={y0+(ph*i)/4} x2={x1} y2={y0+(ph*i)/4} stroke="#e2e8f0" strokeWidth="1"/>)}{shown.map((p,i)=>{const x=x0+(shown.length<=1?pw/2:i*step); const bw=Math.max(12,Math.min(38,pw/Math.max(3,shown.length)-6)); const bh=(p.revenue/maxRev)*ph; return <rect key={p.key} x={x-bw/2} y={y1-bh} width={bw} height={Math.max(2,bh)} rx="6" fill={hover===p.key?"#0ea5e9":"#22c55e"} opacity={hover===p.key?0.9:0.75}/>;})}{line && <path d={line} fill="none" stroke="#1d4ed8" strokeWidth="3" strokeLinecap="round"/>}{shown.map((p,i)=>{const x=x0+(shown.length<=1?pw/2:i*step); const y=y1-(p.units/maxUnits)*ph; return <circle key={`d-${p.key}`} cx={x} cy={y} r={hover===p.key?5:4} fill="#1d4ed8"/>;})}{shown.map((p,i)=>{if(i%Math.max(1,Math.ceil(shown.length/10))!==0&&i!==shown.length-1)return null; const x=x0+(shown.length<=1?pw/2:i*step); return <text key={`l-${p.key}`} x={x} y={288} textAnchor="middle" fontSize="11" fill="#64748b">{p.label}</text>;})}{shown.map((p,i)=>{const l=i===0?x0:x0+(shown.length<=1?0:(i-0.5)*step); const r=i===shown.length-1?x1:x0+(shown.length<=1?pw:(i+0.5)*step); return <rect key={`h-${p.key}`} x={l} y={y0} width={Math.max(8,r-l)} height={ph} fill="transparent" onMouseEnter={()=>setHover(p.key)}/>;})}</svg></div>
-        </article>
-
-        <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm"><h2 className="text-lg font-semibold text-slate-900">Channel Breakdown</h2><p className="mt-1 text-sm text-slate-500">Top sales channels by revenue.</p><div className="mt-4 space-y-3">{channels.length===0?<p className="text-sm text-slate-500">No sales data yet.</p>:channels.map((it)=><div key={it.channel} className="rounded-2xl border border-slate-100 bg-slate-50 p-3"><div className="flex items-center justify-between gap-3"><p className="text-sm font-semibold text-slate-800">{it.channel}</p><p className="text-sm font-semibold text-slate-900">{eur(it.revenue)}</p></div></div>)}</div></article>
+            <section className="rounded-3xl border border-cyan-200 bg-gradient-to-br from-cyan-50 via-white to-sky-50 p-5 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-800">Shared Date Filter</p><span className="rounded-full border border-cyan-300 bg-cyan-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-cyan-900">{activeModeLabel} filter active</span></div>
+        <div className="mt-3 flex w-fit rounded-full border border-slate-200 bg-white p-1">{(["daily","weekly","monthly"] as G[]).map((x)=><button key={x} type="button" onClick={()=>{setG(x);setOpenCal(false);setOpenMonth(false);}} className={x===g?"rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white":"rounded-full px-3 py-1 text-xs font-semibold text-slate-600 hover:text-slate-900"}>{x}</button>)}</div>
+        <div ref={filterPopoverRef} className="relative mt-3 max-w-md">
+          {g !== "monthly" ? (<><button type="button" className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pr-10 text-left text-sm text-slate-700" onClick={()=>setOpenCal((p)=>!p)}>{g==="daily"?dayLbl:weekLbl}</button>{hasActiveFilter && <button type="button" aria-label="Clear date filter" className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full border border-slate-200 bg-white px-1.5 py-0.5 text-xs font-semibold leading-none text-slate-500 hover:text-slate-700" onClick={(e)=>{e.preventDefault();e.stopPropagation();setDayRange(undefined);setWeekRange(undefined);setMonthRange({});setOpenCal(false);setOpenMonth(false);}}>x</button>}{openCal && <div className="absolute z-20 mt-2 rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">{g==="daily" ? <DayPicker mode="range" numberOfMonths={1} className="text-sm" selected={dayRange} onSelect={(r,s)=>{if(!s)return; if(dayRange?.from&&dayRange?.to){setDayRange({from:s,to:undefined});return;} setDayRange(r); if(r?.from&&r?.to) setOpenCal(false);}}/> : <DayPicker mode="single" numberOfMonths={1} className="text-sm" showWeekNumber disabled={{ dayOfWeek: [0, 2, 3, 4, 5, 6] }} modifiersStyles={{ disabled: { opacity: 0.35, color: "#94a3b8" } }} selected={weekRange?.from ? wkStart(weekRange.from) : undefined} onSelect={(d)=>{if(!d)return; const picked=wkStart(d); if(!weekRange?.from||weekRange?.to){setWeekRange({from:picked,to:undefined});return;} const first=wkStart(weekRange.from); if(picked.getTime()<first.getTime()){setWeekRange({from:picked,to:undefined});return;} setWeekRange({from:first,to:addDays(picked,6)}); setOpenCal(false);}}/>}<div className="mt-2 flex justify-between"><button type="button" className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700" onClick={()=>g==="daily"?setDayRange(undefined):setWeekRange(undefined)}>Clear</button><button type="button" className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700" onClick={()=>setOpenCal(false)}>Close</button></div></div>}</>) : (<><button type="button" className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pr-10 text-left text-sm text-slate-700" onClick={()=>setOpenMonth((p)=>!p)}>{monthLbl}</button>{hasActiveFilter && <button type="button" aria-label="Clear date filter" className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full border border-slate-200 bg-white px-1.5 py-0.5 text-xs font-semibold leading-none text-slate-500 hover:text-slate-700" onClick={(e)=>{e.preventDefault();e.stopPropagation();setDayRange(undefined);setWeekRange(undefined);setMonthRange({});setOpenCal(false);setOpenMonth(false);}}>x</button>}{openMonth && <div className="absolute z-20 mt-2 w-full rounded-2xl border border-slate-200 bg-white p-3 shadow-xl"><div className="mb-3 flex items-center justify-between"><button type="button" className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700" onClick={()=>setMonthYear((y)=>y-1)}>Prev year</button><p className="text-sm font-semibold text-slate-800">{monthYear}</p><button type="button" className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700" onClick={()=>setMonthYear((y)=>y+1)}>Next year</button></div><div className="grid grid-cols-3 gap-2">{["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"].map((m,i)=>{const k=`${monthYear}-${String(i+1).padStart(2,"0")}`; const f=monthRange.from||""; const t=monthRange.to||""; const inR=f&&t&&monthVal(k)>=monthVal(f)&&monthVal(k)<=monthVal(t); const edge=k===f||k===t; return <button key={k} type="button" className={edge?"rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-white":inR?"rounded-xl bg-slate-200 px-3 py-2 text-xs font-semibold text-slate-800":"rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"} onClick={()=>{if(!monthRange.from||(monthRange.from&&monthRange.to)){setMonthRange({from:k,to:undefined});return;} if(monthVal(k)<monthVal(monthRange.from)){setMonthRange({from:k,to:undefined});return;} setMonthRange({from:monthRange.from,to:k});setOpenMonth(false);}}>{m}</button>;})}</div><div className="mt-3 flex justify-between"><button type="button" className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700" onClick={()=>setMonthRange({})}>Clear</button><button type="button" className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700" onClick={()=>setOpenMonth(false)}>Close</button></div></div>}</>) }
+        </div>
       </section>
 
-      <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm"><h2 className="text-lg font-semibold text-slate-900">Most Sold Products</h2><p className="mt-1 text-sm text-slate-500">Best performers ranked by units sold.</p>{topProducts.length===0?<p className="mt-4 text-sm text-slate-500">No product sales yet.</p>:<div className="mt-4 grid gap-3 md:grid-cols-2">{topProducts.map((it,i)=><div key={`${it.name}-${i}`} className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><div className="flex items-start justify-between gap-3"><div><p className="text-xs uppercase tracking-wide text-slate-500">#{i+1}</p><p className="mt-1 text-sm font-semibold text-slate-900">{it.name}</p></div><div className="text-right"><p className="text-sm font-semibold text-slate-900">{it.units.toFixed(0)} units</p><p className="text-xs text-slate-500">{eur(it.revenue)}</p></div></div></div>)}</div>}</article>
+      <section className="grid gap-6 lg:grid-cols-[2fr_1fr]">
+        <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold text-slate-900">Trend Explorer</h2><p className="mt-1 text-sm text-slate-500">Bars: revenue. Line: products sold. Hover for exact values.</p></div><span className="rounded-full border border-cyan-200 bg-cyan-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-cyan-800">{activeModeLabel} filter active</span></div><div className="relative mt-4 rounded-2xl border border-slate-100 bg-slate-50 p-3">{hovered && <div className="absolute left-4 top-4 z-10 rounded-xl border border-slate-200 bg-white/95 px-3 py-2 text-xs shadow"><p className="font-semibold text-slate-800">{hovered.label}</p><p className="text-slate-600">Revenue: {eur(hovered.revenue)}</p><p className="text-slate-600">Units: {hovered.units.toFixed(0)}</p></div>}<svg viewBox={`0 0 ${w} ${h}`} className="h-[320px] w-full" onMouseLeave={()=>setHover(null)}>{[0,1,2,3,4].map((i)=><line key={i} x1={x0} y1={y0+(ph*i)/4} x2={x1} y2={y0+(ph*i)/4} stroke="#e2e8f0" strokeWidth="1"/>)}{shown.map((p,i)=>{const x=x0+(shown.length<=1?pw/2:i*step); const bw=Math.max(12,Math.min(38,pw/Math.max(3,shown.length)-6)); const bh=(p.revenue/maxRev)*ph; return <rect key={p.key} x={x-bw/2} y={y1-bh} width={bw} height={Math.max(2,bh)} rx="6" fill={hover===p.key?"#0ea5e9":"#22c55e"} opacity={hover===p.key?0.9:0.75}/>;})}{line && <path d={line} fill="none" stroke="#1d4ed8" strokeWidth="3" strokeLinecap="round"/>}{shown.map((p,i)=>{const x=x0+(shown.length<=1?pw/2:i*step); const y=y1-(p.units/maxUnits)*ph; return <circle key={`d-${p.key}`} cx={x} cy={y} r={hover===p.key?5:4} fill="#1d4ed8"/>;})}{shown.map((p,i)=>{if(i%Math.max(1,Math.ceil(shown.length/10))!==0&&i!==shown.length-1)return null; const x=x0+(shown.length<=1?pw/2:i*step); return <text key={`l-${p.key}`} x={x} y={288} textAnchor="middle" fontSize="11" fill="#64748b">{p.label}</text>;})}{shown.map((p,i)=>{const l=i===0?x0:x0+(shown.length<=1?0:(i-0.5)*step); const r=i===shown.length-1?x1:x0+(shown.length<=1?pw:(i+0.5)*step); return <rect key={`h-${p.key}`} x={l} y={y0} width={Math.max(8,r-l)} height={ph} fill="transparent" onMouseEnter={()=>setHover(p.key)}/>;})}</svg></div>
+        </article>
+
+        <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm"><div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-lg font-semibold text-slate-900">Channel Breakdown</h2><span className="rounded-full border border-cyan-200 bg-cyan-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-cyan-800">{activeModeLabel} filter active</span></div><p className="mt-1 text-sm text-slate-500">Top sales channels by revenue.</p><div className="mt-4 space-y-3">{channels.length===0?<p className="text-sm text-slate-500">No sales data yet.</p>:channels.map((it)=><div key={it.channel} className="rounded-2xl border border-slate-100 bg-slate-50 p-3"><div className="flex items-center justify-between gap-3"><p className="text-sm font-semibold text-slate-800">{it.channel}</p><p className="text-sm font-semibold text-slate-900">{eur(it.revenue)}</p></div></div>)}</div></article>
+      </section>
+
+      <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm"><div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-lg font-semibold text-slate-900">Most Sold Products</h2><span className="rounded-full border border-cyan-200 bg-cyan-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-cyan-800">{activeModeLabel} filter active</span></div><p className="mt-1 text-sm text-slate-500">Best performers ranked by units sold.</p>{topProducts.length===0?<p className="mt-4 text-sm text-slate-500">No product sales yet.</p>:<div className="mt-4 grid gap-3 md:grid-cols-2">{topProducts.map((it,i)=><div key={`${it.name}-${i}`} className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><div className="flex items-start justify-between gap-3"><div><p className="text-xs uppercase tracking-wide text-slate-500">#{i+1}</p><p className="mt-1 text-sm font-semibold text-slate-900">{it.name}</p></div><div className="text-right"><p className="text-sm font-semibold text-slate-900">{it.units.toFixed(0)} units</p><p className="text-xs text-slate-500">{eur(it.revenue)}</p></div></div></div>)}</div>}</article>
 
       {msg && <p className="text-sm text-rose-600">{msg}</p>}
     </section>
   );
 }
+
+
+
+
 
 

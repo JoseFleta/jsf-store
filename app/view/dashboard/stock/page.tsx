@@ -250,6 +250,7 @@ export default function StockPage() {
     }
     return { inQty, outQty, stock };
   }, [filteredRows]);
+  const hasActiveFilters = productTypeFilter !== "all" || search.trim().length > 0;
 
   const toggleSort = (key: StockSortKey) => {
     setSort((prev) => {
@@ -397,52 +398,92 @@ export default function StockPage() {
 
   return (
     <section className="space-y-6">
-      <header className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+      <header className="relative overflow-hidden rounded-[28px] border border-slate-300 bg-gradient-to-br from-slate-100 via-white to-blue-100 p-6 shadow-sm">
+        <div className="absolute -right-14 -top-16 h-40 w-40 rounded-full bg-slate-300/30 blur-2xl" />
+        <div className="absolute -bottom-14 left-20 h-36 w-36 rounded-full bg-blue-300/25 blur-2xl" />
+        <div className="relative">
         <h1 className="text-2xl font-semibold text-slate-900">Stock</h1>
-        <p className="mt-1 text-sm text-slate-500">Stock is calculated automatically from purchases and sales.</p>
-        <div className="mt-5 grid gap-4 md:grid-cols-5">
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+        <p className="mt-1 text-sm text-slate-600">Stock is calculated automatically from purchases and sales.</p>
+        <div className="mt-5 grid gap-4 md:grid-cols-3">
+          <div className="rounded-2xl border border-slate-200 bg-white/90 px-4 py-3">
             <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Inflow</p>
             <p className="mt-1 text-xl font-semibold text-slate-900">{totals.inQty.toFixed(0)}</p>
           </div>
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+          <div className="rounded-2xl border border-slate-200 bg-white/90 px-4 py-3">
             <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Outflow</p>
             <p className="mt-1 text-xl font-semibold text-slate-900">{totals.outQty.toFixed(0)}</p>
           </div>
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+          <div className="rounded-2xl border border-slate-200 bg-white/90 px-4 py-3">
             <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Current stock</p>
             <p className="mt-1 text-xl font-semibold text-slate-900">{totals.stock.toFixed(0)}</p>
           </div>
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-            <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Type</label>
-            <select
-              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
-              value={productTypeFilter}
-              onChange={(e) => setProductTypeFilter(e.target.value as ProductTypeFilter)}
-            >
-              <option value="all">All</option>
-              <option value="maquetas">Models</option>
-              <option value="ropa">Apparel</option>
-              <option value="accesorios">Accessories</option>
-            </select>
+        </div>
+        <div className="mt-4 rounded-2xl border border-slate-300 bg-gradient-to-br from-slate-50 via-white to-blue-50 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-700">Shared Filters</p>
+            <div className="flex items-center gap-2">
+              <span className="rounded-full border border-slate-300 bg-white px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-700">
+                {hasActiveFilters ? "Filters active" : "No filters"}
+              </span>
+              {hasActiveFilters && (
+                <button
+                  type="button"
+                  className="rounded-full border border-slate-300 bg-white px-3 py-1 text-xs font-semibold text-slate-700 hover:border-slate-400"
+                  onClick={() => {
+                    setProductTypeFilter("all");
+                    setSearch("");
+                  }}
+                >
+                  Clear all
+                </button>
+              )}
+            </div>
           </div>
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-            <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Search</label>
-            <input
-              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
-              placeholder="Search by name or detail"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            <div>
+              <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Type</label>
+              <select
+                className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+                value={productTypeFilter}
+                onChange={(e) => setProductTypeFilter(e.target.value as ProductTypeFilter)}
+              >
+                <option value="all">All</option>
+                <option value="maquetas">Models</option>
+                <option value="ropa">Apparel</option>
+                <option value="accesorios">Accessories</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Search</label>
+              <div className="relative mt-2">
+                <input
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pr-10 text-sm text-slate-700"
+                  placeholder="Search by name or detail"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+                {search.trim().length > 0 && (
+                  <button
+                    type="button"
+                    aria-label="Clear search"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full border border-slate-200 bg-white px-1.5 py-0.5 text-xs font-semibold leading-none text-slate-500 hover:text-slate-700"
+                    onClick={() => setSearch("")}
+                  >
+                    x
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
+        </div>
         </div>
       </header>
 
-      <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+      <article className="rounded-3xl border border-slate-300 bg-gradient-to-b from-white to-slate-50/60 p-6 shadow-sm">
         <div className="flex flex-wrap items-end gap-3">
           <button
             type="button"
-            className="rounded-full border border-emerald-300 bg-white px-4 py-2 text-sm font-semibold text-emerald-700 shadow-sm transition hover:border-emerald-400 disabled:opacity-60"
+            className="rounded-full border border-blue-300 bg-white px-4 py-2 text-sm font-semibold text-blue-700 shadow-sm transition hover:border-blue-400 disabled:opacity-60"
             onClick={() => handleSyncMarketplaces(selectedSyncSkus)}
             disabled={!selectedStoreId || loading || syncingMarketplaces || selectedSyncSkus.length === 0}
           >
@@ -450,7 +491,7 @@ export default function StockPage() {
           </button>
           <button
             type="button"
-            className="rounded-full border border-indigo-300 bg-white px-4 py-2 text-sm font-semibold text-indigo-700 shadow-sm transition hover:border-indigo-400 disabled:opacity-60"
+            className="rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-400 disabled:opacity-60"
             onClick={() => handleSyncMarketplaces()}
             disabled={!selectedStoreId || loading || syncingMarketplaces}
           >
@@ -484,10 +525,10 @@ export default function StockPage() {
             No results for this filter.
           </p>
         ) : (
-          <div className="mt-4 overflow-x-auto">
+          <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-200 bg-white">
             <table className="min-w-full divide-y divide-slate-200 text-sm">
               <thead>
-                <tr className="text-left text-xs uppercase tracking-wide text-slate-500">
+                <tr className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
                   <th className="px-2 py-3">
                     <input
                       type="checkbox"
@@ -530,7 +571,7 @@ export default function StockPage() {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {paginatedRows.map((row) => (
-                  <tr key={row.id} className="text-slate-700">
+                  <tr key={row.id} className="text-slate-700 transition-colors hover:bg-slate-50">
                     <td className="px-2 py-3">
                       <input
                         type="checkbox"

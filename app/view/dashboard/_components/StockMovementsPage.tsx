@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { DayPicker, type DateRange } from "react-day-picker";
 import "react-day-picker/dist/style.css";
@@ -270,6 +270,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
   const [search, setSearch] = useState("");
   const [dateRange, setDateRange] = useState<DateRange | undefined>(undefined);
   const [isDateRangeOpen, setIsDateRangeOpen] = useState(false);
+  const dateRangePopoverRef = useRef<HTMLDivElement | null>(null);
   const [channelFilter, setChannelFilter] = useState("all");
   const [productTypeFilter, setProductTypeFilter] = useState<ProductTypeFilter>("all");
   const [pageSize, setPageSize] = useState(10);
@@ -501,6 +502,11 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
       return typeMatch && channelMatch && fromMatch && toMatch && (sku.includes(term) || name.includes(term) || ch.includes(term) || subtype.includes(term));
     });
   }, [rows, search, productTypeFilter, channelFilter, dateRange]);
+  const hasActiveFilters =
+    search.trim().length > 0 ||
+    productTypeFilter !== "all" ||
+    channelFilter !== "all" ||
+    Boolean(dateRange?.from || dateRange?.to);
 
   const sortedRows = useMemo(() => {
     if (!sort) return filteredRows;
@@ -528,6 +534,19 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
   useEffect(() => {
     setPage(1);
   }, [selectedStoreId, search, pageSize, productTypeFilter, dateRange, channelFilter]);
+
+  useEffect(() => {
+    if (!isDateRangeOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const node = dateRangePopoverRef.current;
+      if (!node) return;
+      if (event.target instanceof Node && !node.contains(event.target)) {
+        setIsDateRangeOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [isDateRangeOpen]);
 
   useEffect(() => {
     if (filteredProducts.length === 0) {
@@ -878,7 +897,10 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
 
   return (
     <section className="space-y-6">
-      <header className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+      <header className="relative overflow-hidden rounded-[28px] border border-slate-300 bg-gradient-to-br from-slate-100 via-white to-blue-100 p-6 shadow-sm">
+        <div className="absolute -right-14 -top-16 h-40 w-40 rounded-full bg-slate-300/30 blur-2xl" />
+        <div className="absolute -bottom-14 left-20 h-36 w-36 rounded-full bg-blue-300/25 blur-2xl" />
+        <div className="relative">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h1 className="text-2xl font-semibold text-slate-900">{pageTitle}</h1>
@@ -912,20 +934,46 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
           </div>
         </div>
 
+        <div className="mt-4 rounded-2xl border border-slate-300 bg-gradient-to-br from-slate-50 via-white to-blue-50 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-700">Shared Filters</p>
+            <div className="flex items-center gap-2">
+              <span className="rounded-full border border-slate-300 bg-white px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-700">
+                {hasActiveFilters ? "Filters active" : "No filters"}
+              </span>
+              {hasActiveFilters && (
+                <button
+                  type="button"
+                  className="rounded-full border border-slate-300 bg-white px-3 py-1 text-xs font-semibold text-slate-700 hover:border-slate-400"
+                  onClick={() => {
+                    setDateRange(undefined);
+                    setProductTypeFilter("all");
+                    setChannelFilter("all");
+                    setSearch("");
+                    setIsDateRangeOpen(false);
+                  }}
+                >
+                  Clear all
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
         <div className="mt-5 grid gap-4 md:grid-cols-6">
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+          <div className="rounded-2xl border border-slate-200 bg-white/90 px-4 py-3">
             <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
               {movementType === "sale" ? "Total sales" : "Total purchases"}
             </p>
             <p className="mt-1 text-xl font-semibold text-slate-900">{toCurrency(totals.amount)}</p>
           </div>
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+          <div className="rounded-2xl border border-slate-200 bg-white/90 px-4 py-3">
             <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Quantity</p>
             <p className="mt-1 text-xl font-semibold text-slate-900">{totals.qty.toFixed(0)}</p>
           </div>
           <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
             <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Date range</label>
-            <div className="relative mt-2">
+            <div ref={dateRangePopoverRef} className="relative mt-2">
               <button
                 type="button"
                 className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pr-10 text-left text-sm text-slate-700"
@@ -982,7 +1030,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
               )}
             </div>
           </div>
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+          <div className="rounded-2xl border border-slate-200 bg-white/85 px-4 py-3">
             <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Type</label>
             <select
               className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
@@ -995,7 +1043,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
               <option value="accesorios">Accessories</option>
             </select>
           </div>
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+          <div className="rounded-2xl border border-slate-200 bg-white/85 px-4 py-3">
             <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Search</label>
             <input
               className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
@@ -1004,7 +1052,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+          <div className="rounded-2xl border border-slate-200 bg-white/85 px-4 py-3">
             <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Channel</label>
             <select
               className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
@@ -1020,9 +1068,10 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
             </select>
           </div>
         </div>
+        </div>
       </header>
 
-      <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+      <article className="rounded-3xl border border-slate-300 bg-gradient-to-b from-white to-slate-50/60 p-6 shadow-sm">
           <div className="flex items-end justify-between gap-3">
             <div>
               <h2 className="text-lg font-semibold text-slate-900">{pageTitle}</h2>
@@ -1064,10 +1113,10 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
               No records.
             </p>
           ) : (
-            <div className="mt-4 overflow-x-auto">
+            <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-200 bg-white">
               <table className="min-w-full divide-y divide-slate-200 text-sm">
                 <thead>
-                  <tr className="text-left text-xs uppercase tracking-wide text-slate-500">
+                  <tr className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
                     <th className="px-2 py-3">
                       <input
                         type="checkbox"
@@ -1120,7 +1169,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
                     const qty = Number(row.quantity || 0);
                     const totalAmountValue = Number(row.unit_price || 0);
                     return (
-                      <tr key={row.id} className="text-slate-700">
+                    <tr key={row.id} className="text-slate-700 transition-colors hover:bg-slate-50">
                         <td className="px-2 py-3">
                           <input
                             type="checkbox"
