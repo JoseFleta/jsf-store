@@ -20,6 +20,9 @@ type ProductRow = {
   clothing_type: string | null;
   accessory_type: string | null;
   catchy_phrase: string | null;
+  base_price: number;
+  woo_price: number | null;
+  etsy_price: number | null;
   is_active: boolean;
   created_at: string;
 };
@@ -32,7 +35,20 @@ type CsvProduct = {
   clothing_type: string | null;
   accessory_type: string | null;
   catchy_phrase: string | null;
+  base_price?: number;
+  woo_price?: number | null;
+  etsy_price?: number | null;
   is_active: boolean;
+};
+
+type ProductImageRow = {
+  id: string;
+  store_id: string;
+  product_id: string;
+  storage_path: string;
+  sort_order: number;
+  is_primary: boolean;
+  created_at: string;
 };
 
 const PRODUCT_TYPES: ProductType[] = ["ropa", "maquetas", "accesorios"];
@@ -105,6 +121,18 @@ function compareText(a: string, b: string): number {
   return a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
 }
 
+function sanitizeFileName(name: string): string {
+  return name.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+function parsePriceInput(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const normalized = Number(trimmed);
+  if (!Number.isFinite(normalized) || normalized < 0) return null;
+  return Math.round(normalized * 100) / 100;
+}
+
 function parseCsvProducts(csvText: string): { rows: CsvProduct[]; errors: string[] } {
   const lines = csvText
     .split(/\r?\n/)
@@ -124,6 +152,9 @@ function parseCsvProducts(csvText: string): { rows: CsvProduct[]; errors: string
   const clothingTypeIndex = header.indexOf("clothing_type");
   const accessoryTypeIndex = header.indexOf("accessory_type");
   const phraseIndex = header.indexOf("catchy_phrase");
+  const basePriceIndex = header.indexOf("base_price");
+  const wooPriceIndex = header.indexOf("woo_price");
+  const etsyPriceIndex = header.indexOf("etsy_price");
   const activeIndex = header.indexOf("is_active");
 
   if (skuIndex < 0 || titleIndex < 0) {
@@ -144,6 +175,9 @@ function parseCsvProducts(csvText: string): { rows: CsvProduct[]; errors: string
     const clothingRaw = clothingTypeIndex >= 0 ? (cols[clothingTypeIndex] || "").trim() : "";
     const accessoryRaw = accessoryTypeIndex >= 0 ? (cols[accessoryTypeIndex] || "").trim() : "";
     const phraseRaw = phraseIndex >= 0 ? (cols[phraseIndex] || "").trim() : "";
+    const basePriceRaw = basePriceIndex >= 0 ? (cols[basePriceIndex] || "").trim() : "";
+    const wooPriceRaw = wooPriceIndex >= 0 ? (cols[wooPriceIndex] || "").trim() : "";
+    const etsyPriceRaw = etsyPriceIndex >= 0 ? (cols[etsyPriceIndex] || "").trim() : "";
     const activeRaw = activeIndex >= 0 ? (cols[activeIndex] || "").trim().toLowerCase() : "true";
 
     if (!sku || !title) {
@@ -153,6 +187,21 @@ function parseCsvProducts(csvText: string): { rows: CsvProduct[]; errors: string
 
     if (typeIndex >= 0 && !parsedType) {
       errors.push(`Row ${lineNo + 1}: invalid product_type. Use ropa, maquetas, or accesorios.`);
+      continue;
+    }
+    const parsedBasePrice = basePriceRaw ? Number(basePriceRaw) : 0;
+    const parsedWooPrice = wooPriceRaw ? Number(wooPriceRaw) : null;
+    const parsedEtsyPrice = etsyPriceRaw ? Number(etsyPriceRaw) : null;
+    if (!Number.isFinite(parsedBasePrice) || parsedBasePrice < 0) {
+      errors.push(`Row ${lineNo + 1}: base_price must be 0 or greater.`);
+      continue;
+    }
+    if (parsedWooPrice != null && (!Number.isFinite(parsedWooPrice) || parsedWooPrice < 0)) {
+      errors.push(`Row ${lineNo + 1}: woo_price must be 0 or greater when present.`);
+      continue;
+    }
+    if (parsedEtsyPrice != null && (!Number.isFinite(parsedEtsyPrice) || parsedEtsyPrice < 0)) {
+      errors.push(`Row ${lineNo + 1}: etsy_price must be 0 or greater when present.`);
       continue;
     }
 
@@ -172,6 +221,9 @@ function parseCsvProducts(csvText: string): { rows: CsvProduct[]; errors: string
       clothing_type: productType === "ropa" ? clothingRaw || null : null,
       accessory_type: productType === "accesorios" ? accessoryRaw || null : null,
       catchy_phrase: phraseRaw || null,
+      base_price: Math.round(parsedBasePrice * 100) / 100,
+      woo_price: parsedWooPrice == null ? null : Math.round(parsedWooPrice * 100) / 100,
+      etsy_price: parsedEtsyPrice == null ? null : Math.round(parsedEtsyPrice * 100) / 100,
       is_active: isActive,
     });
   }
@@ -192,6 +244,9 @@ function normalizeProductRow(row: Partial<ProductRow> & { id: string; store_id: 
     clothing_type: row.clothing_type ?? null,
     accessory_type: row.accessory_type ?? null,
     catchy_phrase: row.catchy_phrase ?? null,
+    base_price: Number(row.base_price ?? 0) || 0,
+    woo_price: row.woo_price == null ? null : Number(row.woo_price),
+    etsy_price: row.etsy_price == null ? null : Number(row.etsy_price),
     is_active: Boolean(row.is_active),
     created_at: row.created_at ?? new Date().toISOString(),
     sku: (row.sku ?? "").toString(),
@@ -213,6 +268,9 @@ export default function ProductsPage() {
   const [clothingType, setClothingType] = useState("");
   const [accessoryType, setAccessoryType] = useState("");
   const [catchyPhrase, setCatchyPhrase] = useState("");
+  const [basePrice, setBasePrice] = useState("0.00");
+  const [wooPrice, setWooPrice] = useState("");
+  const [etsyPrice, setEtsyPrice] = useState("");
   const [isActive, setIsActive] = useState(true);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
@@ -228,6 +286,9 @@ export default function ProductsPage() {
   const [editClothingType, setEditClothingType] = useState("");
   const [editAccessoryType, setEditAccessoryType] = useState("");
   const [editPhrase, setEditPhrase] = useState("");
+  const [editBasePrice, setEditBasePrice] = useState("");
+  const [editWooPrice, setEditWooPrice] = useState("");
+  const [editEtsyPrice, setEditEtsyPrice] = useState("");
   const [editActive, setEditActive] = useState(true);
 
   const [pageSize, setPageSize] = useState(10);
@@ -242,9 +303,15 @@ export default function ProductsPage() {
   const [saving, setSaving] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
   const [bulkWorking, setBulkWorking] = useState(false);
+  const [syncingPrices, setSyncingPrices] = useState(false);
   const [importing, setImporting] = useState(false);
   const [msg, setMsg] = useState("");
   const [csvErrors, setCsvErrors] = useState<string[]>([]);
+  const [productImagesByProductId, setProductImagesByProductId] = useState<Record<string, ProductImageRow[]>>({});
+  const [mediaProduct, setMediaProduct] = useState<ProductRow | null>(null);
+  const [mediaLoading, setMediaLoading] = useState(false);
+  const [mediaUploading, setMediaUploading] = useState(false);
+  const [mediaMsg, setMediaMsg] = useState("");
 
   useEffect(() => {
     setSelectedStoreId(searchParams.get("store") || "");
@@ -275,7 +342,7 @@ export default function ProductsPage() {
       setLoadingProducts(true);
       const { data, error } = await supabase
         .from("products")
-        .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,is_active,created_at")
+        .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,base_price,woo_price,etsy_price,is_active,created_at")
         .eq("store_id", selectedStoreId)
         .order("created_at", { ascending: false });
 
@@ -293,6 +360,46 @@ export default function ProductsPage() {
     };
 
     loadProducts();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedStoreId, supabase]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadProductImages = async () => {
+      if (!selectedStoreId) {
+        setProductImagesByProductId({});
+        return;
+      }
+
+      setMediaLoading(true);
+      const { data, error } = await supabase
+        .from("product_images")
+        .select("id,store_id,product_id,storage_path,sort_order,is_primary,created_at")
+        .eq("store_id", selectedStoreId)
+        .order("sort_order", { ascending: true })
+        .order("created_at", { ascending: true });
+
+      if (cancelled) return;
+
+      if (error) {
+        setMediaLoading(false);
+        setMediaMsg(error.message);
+        return;
+      }
+
+      const grouped: Record<string, ProductImageRow[]> = {};
+      for (const row of (data ?? []) as ProductImageRow[]) {
+        if (!grouped[row.product_id]) grouped[row.product_id] = [];
+        grouped[row.product_id].push(row);
+      }
+      setProductImagesByProductId(grouped);
+      setMediaLoading(false);
+    };
+
+    loadProductImages();
     return () => {
       cancelled = true;
     };
@@ -355,6 +462,12 @@ export default function ProductsPage() {
     return { total, active };
   }, [filteredProducts]);
   const hasActiveFilters = productTypeFilter !== "all" || search.trim().length > 0;
+  const currentMediaList = mediaProduct ? productImagesByProductId[mediaProduct.id] || [] : [];
+
+  const getPublicImageUrl = (storagePath: string) => {
+    const { data } = supabase.storage.from("product-images").getPublicUrl(storagePath);
+    return data.publicUrl;
+  };
 
   const toggleSort = (key: ProductSortKey) => {
     setSort((prev) => {
@@ -370,10 +483,10 @@ export default function ProductsPage() {
 
   const downloadCsvTemplate = () => {
     const sample = [
-      "sku,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,is_active",
-      "MODEL-737,Maqueta B737,maquetas,1:400,,,Jet clasico,true",
-      "CAMI-NEGRA,Camiseta Negra,ropa,,Camiseta,,Algodon premium,true",
-      "CASE-LOGO,Accesorio Logo,accesorios,,,Llavero,Edicion limitada,true",
+      "sku,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,base_price,woo_price,etsy_price,is_active",
+      "MODEL-737,Maqueta B737,maquetas,1:400,,,Jet clasico,49.99,52.99,54.99,true",
+      "CAMI-NEGRA,Camiseta Negra,ropa,,Camiseta,,Algodon premium,19.90,21.50,22.00,true",
+      "CASE-LOGO,Accesorio Logo,accesorios,,,Llavero,Edicion limitada,6.50,,,true",
     ].join("\n");
 
     const blob = new Blob([sample], { type: "text/csv;charset=utf-8;" });
@@ -386,7 +499,7 @@ export default function ProductsPage() {
   };
 
   const downloadFilteredProductsCsv = () => {
-    const headers = ["sku", "title", "product_type", "type_detail", "tagline", "is_active", "created_at"];
+    const headers = ["sku", "title", "product_type", "type_detail", "tagline", "base_price", "woo_price", "etsy_price", "is_active", "created_at"];
     const lines = sortedProducts.map((product) =>
       [
         product.sku,
@@ -394,6 +507,9 @@ export default function ProductsPage() {
         product.product_type,
         getProductSubtype(product, "all"),
         product.catchy_phrase || "",
+        product.base_price,
+        product.woo_price ?? "",
+        product.etsy_price ?? "",
         product.is_active,
         product.created_at,
       ]
@@ -423,12 +539,19 @@ export default function ProductsPage() {
     const skuValue = sku.trim().toUpperCase();
     const titleValue = title.trim();
     const phraseValue = catchyPhrase.trim();
+    const basePriceValue = parsePriceInput(basePrice);
+    const wooPriceValue = parsePriceInput(wooPrice);
+    const etsyPriceValue = parsePriceInput(etsyPrice);
     const escalaValue = productType === "maquetas" ? escala.trim() : "";
     const clothingTypeValue = productType === "ropa" ? clothingType.trim() : "";
     const accessoryTypeValue = productType === "accesorios" ? accessoryType.trim() : "";
 
     if (!skuValue || !titleValue) {
       setMsg("SKU and title are required.");
+      return;
+    }
+    if (basePriceValue == null) {
+      setMsg("Base price is required and must be 0 or greater.");
       return;
     }
 
@@ -445,9 +568,12 @@ export default function ProductsPage() {
         clothing_type: clothingTypeValue || null,
         accessory_type: accessoryTypeValue || null,
         catchy_phrase: phraseValue || null,
+        base_price: basePriceValue,
+        woo_price: wooPriceValue,
+        etsy_price: etsyPriceValue,
         is_active: isActive,
       })
-      .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,is_active,created_at")
+      .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,base_price,woo_price,etsy_price,is_active,created_at")
       .single();
     setSaving(false);
 
@@ -464,6 +590,9 @@ export default function ProductsPage() {
     setClothingType("");
     setAccessoryType("");
     setCatchyPhrase("");
+    setBasePrice("0.00");
+    setWooPrice("");
+    setEtsyPrice("");
     setIsActive(true);
     setIsCreateModalOpen(false);
     setMsg("Product created.");
@@ -478,6 +607,9 @@ export default function ProductsPage() {
     setEditClothingType(product.clothing_type || "");
     setEditAccessoryType(product.accessory_type || "");
     setEditPhrase(product.catchy_phrase || "");
+    setEditBasePrice(product.base_price.toFixed(2));
+    setEditWooPrice(product.woo_price == null ? "" : product.woo_price.toFixed(2));
+    setEditEtsyPrice(product.etsy_price == null ? "" : product.etsy_price.toFixed(2));
     setEditActive(product.is_active);
     setMsg("");
     setCsvErrors([]);
@@ -492,6 +624,9 @@ export default function ProductsPage() {
     setEditClothingType("");
     setEditAccessoryType("");
     setEditPhrase("");
+    setEditBasePrice("");
+    setEditWooPrice("");
+    setEditEtsyPrice("");
     setEditActive(true);
   };
 
@@ -501,12 +636,19 @@ export default function ProductsPage() {
     const skuValue = editSku.trim().toUpperCase();
     const titleValue = editTitle.trim();
     const phraseValue = editPhrase.trim();
+    const basePriceValue = parsePriceInput(editBasePrice);
+    const wooPriceValue = parsePriceInput(editWooPrice);
+    const etsyPriceValue = parsePriceInput(editEtsyPrice);
     const escalaValue = editProductType === "maquetas" ? editEscala.trim() : "";
     const clothingTypeValue = editProductType === "ropa" ? editClothingType.trim() : "";
     const accessoryTypeValue = editProductType === "accesorios" ? editAccessoryType.trim() : "";
 
     if (!skuValue || !titleValue) {
       setMsg("SKU and title are required.");
+      return;
+    }
+    if (basePriceValue == null) {
+      setMsg("Base price is required and must be 0 or greater.");
       return;
     }
 
@@ -522,11 +664,14 @@ export default function ProductsPage() {
         clothing_type: clothingTypeValue || null,
         accessory_type: accessoryTypeValue || null,
         catchy_phrase: phraseValue || null,
+        base_price: basePriceValue,
+        woo_price: wooPriceValue,
+        etsy_price: etsyPriceValue,
         is_active: editActive,
       })
       .eq("id", editingId)
       .eq("store_id", selectedStoreId)
-      .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,is_active,created_at")
+      .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,base_price,woo_price,etsy_price,is_active,created_at")
       .single();
     setSavingEdit(false);
 
@@ -548,7 +693,7 @@ export default function ProductsPage() {
       .update({ is_active: false })
       .eq("id", product.id)
       .eq("store_id", selectedStoreId)
-      .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,is_active,created_at")
+      .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,base_price,woo_price,etsy_price,is_active,created_at")
       .single();
 
     if (error) {
@@ -602,6 +747,9 @@ export default function ProductsPage() {
       clothing_type: row.clothing_type,
       accessory_type: row.accessory_type,
       catchy_phrase: row.catchy_phrase,
+      base_price: row.base_price ?? 0,
+      woo_price: row.woo_price ?? null,
+      etsy_price: row.etsy_price ?? null,
       is_active: row.is_active,
     }));
 
@@ -623,7 +771,7 @@ export default function ProductsPage() {
 
     const { data, error } = await supabase
       .from("products")
-      .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,is_active,created_at")
+      .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,base_price,woo_price,etsy_price,is_active,created_at")
       .eq("store_id", selectedStoreId)
       .order("created_at", { ascending: false });
 
@@ -697,6 +845,194 @@ export default function ProductsPage() {
     setSelectedProductIds([]);
   };
 
+  const handleSyncPrices = async () => {
+    if (!selectedStoreId) return;
+    setMsg("");
+    setSyncingPrices(true);
+
+    const productIds =
+      selectedProductIds.length > 0 ? selectedProductIds : filteredProducts.map((product) => product.id);
+
+    const { data: sessionRes } = await supabase.auth.getSession();
+    const accessToken = sessionRes.session?.access_token;
+    if (!accessToken) {
+      setSyncingPrices(false);
+      setMsg("Session expired. Please sign in again.");
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/products/sync-marketplaces", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ storeId: selectedStoreId, productIds }),
+      });
+      const payload = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        syncedSkuCount?: number;
+        woo?: { enabled?: boolean; updated?: number; missingSkuCount?: number; errors?: string[] };
+        etsy?: { enabled?: boolean; updatedListings?: number; missingSkuCount?: number; errors?: string[] };
+        errors?: string[];
+      };
+
+      setSyncingPrices(false);
+      if (!res.ok) {
+        setMsg(payload.error || "Price sync failed.");
+        return;
+      }
+
+      const wooSummary = payload.woo?.enabled
+        ? `Woo: ${payload.woo.updated || 0} updated, ${payload.woo.missingSkuCount || 0} missing SKU`
+        : "Woo: not configured";
+      const etsySummary = payload.etsy?.enabled
+        ? `Etsy: ${payload.etsy.updatedListings || 0} listings updated, ${payload.etsy.missingSkuCount || 0} missing SKU map`
+        : "Etsy: not configured";
+      const firstError = payload.errors?.[0] || payload.woo?.errors?.[0] || payload.etsy?.errors?.[0] || "";
+      setMsg(
+        `Price sync complete. Scope: ${payload.syncedSkuCount || 0} SKU(s). ${wooSummary}. ${etsySummary}.${firstError ? ` First issue: ${firstError}` : ""}`,
+      );
+    } catch (error) {
+      setSyncingPrices(false);
+      setMsg(error instanceof Error ? error.message : "Price sync failed.");
+    }
+  };
+
+  const openMediaManager = (product: ProductRow) => {
+    setMediaMsg("");
+    setMediaProduct(product);
+  };
+
+  const closeMediaManager = () => {
+    setMediaMsg("");
+    setMediaProduct(null);
+  };
+
+  const refreshProductImages = async () => {
+    if (!selectedStoreId) return;
+    const { data, error } = await supabase
+      .from("product_images")
+      .select("id,store_id,product_id,storage_path,sort_order,is_primary,created_at")
+      .eq("store_id", selectedStoreId)
+      .order("sort_order", { ascending: true })
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      setMediaMsg(error.message);
+      return;
+    }
+
+    const grouped: Record<string, ProductImageRow[]> = {};
+    for (const row of (data ?? []) as ProductImageRow[]) {
+      if (!grouped[row.product_id]) grouped[row.product_id] = [];
+      grouped[row.product_id].push(row);
+    }
+    setProductImagesByProductId(grouped);
+  };
+
+  const handleUploadMedia = async (e: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (!mediaProduct || !selectedStoreId || files.length === 0) return;
+
+    setMediaUploading(true);
+    setMediaMsg("");
+    const startOrder = (productImagesByProductId[mediaProduct.id] || []).length;
+    let nextOrder = startOrder;
+    let uploadedCount = 0;
+
+    for (const file of files) {
+      const path = `${selectedStoreId}/${mediaProduct.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${sanitizeFileName(file.name)}`;
+      const uploadRes = await supabase.storage.from("product-images").upload(path, file, {
+        upsert: false,
+      });
+
+      if (uploadRes.error) {
+        setMediaMsg(uploadRes.error.message);
+        continue;
+      }
+
+      const { error: insertError } = await supabase.from("product_images").insert({
+        store_id: selectedStoreId,
+        product_id: mediaProduct.id,
+        storage_path: path,
+        sort_order: nextOrder,
+        is_primary: startOrder === 0 && nextOrder === 0,
+      });
+
+      if (insertError) {
+        setMediaMsg(insertError.message);
+        continue;
+      }
+
+      nextOrder += 1;
+      uploadedCount += 1;
+    }
+
+    await refreshProductImages();
+    setMediaUploading(false);
+    e.target.value = "";
+    if (uploadedCount > 0) {
+      setMediaMsg(`${uploadedCount} image(s) uploaded.`);
+    }
+  };
+
+  const handleSetPrimaryImage = async (image: ProductImageRow) => {
+    if (!mediaProduct || !selectedStoreId) return;
+    setMediaMsg("");
+
+    const { error: clearError } = await supabase
+      .from("product_images")
+      .update({ is_primary: false })
+      .eq("store_id", selectedStoreId)
+      .eq("product_id", mediaProduct.id);
+
+    if (clearError) {
+      setMediaMsg(clearError.message);
+      return;
+    }
+
+    const { error: setError } = await supabase
+      .from("product_images")
+      .update({ is_primary: true })
+      .eq("id", image.id)
+      .eq("store_id", selectedStoreId);
+
+    if (setError) {
+      setMediaMsg(setError.message);
+      return;
+    }
+
+    await refreshProductImages();
+    setMediaMsg("Cover image updated.");
+  };
+
+  const handleDeleteImage = async (image: ProductImageRow) => {
+    if (!mediaProduct || !selectedStoreId) return;
+    setMediaMsg("");
+
+    const { error: storageError } = await supabase.storage.from("product-images").remove([image.storage_path]);
+    if (storageError) {
+      setMediaMsg(storageError.message);
+      return;
+    }
+
+    const { error: rowError } = await supabase
+      .from("product_images")
+      .delete()
+      .eq("id", image.id)
+      .eq("store_id", selectedStoreId);
+
+    if (rowError) {
+      setMediaMsg(rowError.message);
+      return;
+    }
+
+    await refreshProductImages();
+    setMediaMsg("Image deleted.");
+  };
+
   return (
     <section className="space-y-6">
       <header className="relative overflow-hidden rounded-[28px] border border-slate-300 bg-gradient-to-br from-slate-100 via-white to-blue-100 p-6 shadow-sm">
@@ -732,6 +1068,14 @@ export default function ProductsPage() {
               disabled={!selectedStoreId}
             >
               Import CSV
+            </button>
+            <button
+              type="button"
+              className="rounded-full border border-blue-300 bg-white px-5 py-2 text-sm font-semibold text-blue-700 shadow-sm transition hover:border-blue-400 disabled:opacity-60"
+              onClick={handleSyncPrices}
+              disabled={!selectedStoreId || syncingPrices || filteredProducts.length === 0}
+            >
+              {syncingPrices ? "Syncing..." : `Sync prices${selectedProductIds.length > 0 ? ` (${selectedProductIds.length})` : ""}`}
             </button>
           </div>
         </div>
@@ -897,17 +1241,23 @@ export default function ProductsPage() {
                         {getSubtypeLabel(productTypeFilter)} <span>{getSortArrow("subtype")}</span>
                       </button>
                     </th>
-                    <th className="px-2 py-3">
-                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("tagline")}>
-                        Tagline <span>{getSortArrow("tagline")}</span>
-                      </button>
-                    </th>
-                    <th className="px-2 py-3">Actions</th>
-                  </tr>
+	                    <th className="px-2 py-3">
+	                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("tagline")}>
+	                        Tagline <span>{getSortArrow("tagline")}</span>
+	                      </button>
+	                    </th>
+	                    <th className="px-2 py-3">Base</th>
+	                    <th className="px-2 py-3">Woo</th>
+	                    <th className="px-2 py-3">Etsy</th>
+	                    <th className="px-2 py-3">Media</th>
+	                    <th className="px-2 py-3">Actions</th>
+	                  </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {paginatedProducts.map((product) => {
-                    const isEditing = editingId === product.id;
+	                  {paginatedProducts.map((product) => {
+	                    const isEditing = editingId === product.id;
+                      const mediaList = productImagesByProductId[product.id] || [];
+                      const primaryImage = mediaList.find((image) => image.is_primary) || mediaList[0];
 
                     return (
                       <tr key={product.id} className="text-slate-700 transition-colors hover:bg-slate-50">
@@ -930,9 +1280,9 @@ export default function ProductsPage() {
                             product.sku
                           )}
                         </td>
-                        <td className="px-2 py-3">
-                          {isEditing ? (
-                            <input
+	                        <td className="px-2 py-3">
+	                          {isEditing ? (
+	                            <input
                               className="w-56 rounded-lg border border-slate-200 px-2 py-1"
                               value={editTitle}
                               onChange={(e) => setEditTitle(e.target.value)}
@@ -983,19 +1333,77 @@ export default function ProductsPage() {
                             getProductSubtype(product, productTypeFilter)
                           )}
                         </td>
-                        <td className="px-2 py-3">
-                          {isEditing ? (
-                            <input
-                              className="w-56 rounded-lg border border-slate-200 px-2 py-1"
-                              value={editPhrase}
-                              onChange={(e) => setEditPhrase(e.target.value)}
-                            />
-                          ) : (
-                            product.catchy_phrase || "-"
-                          )}
-                        </td>
-                        <td className="px-2 py-3">
-                          <div className="flex flex-wrap gap-2">
+	                        <td className="px-2 py-3">
+	                          {isEditing ? (
+	                            <input
+	                              className="w-56 rounded-lg border border-slate-200 px-2 py-1"
+	                              value={editPhrase}
+	                              onChange={(e) => setEditPhrase(e.target.value)}
+	                            />
+	                          ) : (
+	                            product.catchy_phrase || "-"
+	                          )}
+	                        </td>
+                          <td className="px-2 py-3">
+                            {isEditing ? (
+                              <input
+                                className="w-24 rounded-lg border border-slate-200 px-2 py-1"
+                                value={editBasePrice}
+                                onChange={(e) => setEditBasePrice(e.target.value)}
+                                inputMode="decimal"
+                              />
+                            ) : (
+                              product.base_price.toFixed(2)
+                            )}
+                          </td>
+                          <td className="px-2 py-3">
+                            {isEditing ? (
+                              <input
+                                className="w-24 rounded-lg border border-slate-200 px-2 py-1"
+                                value={editWooPrice}
+                                onChange={(e) => setEditWooPrice(e.target.value)}
+                                inputMode="decimal"
+                                placeholder="-"
+                              />
+                            ) : product.woo_price == null ? (
+                              "-"
+                            ) : (
+                              product.woo_price.toFixed(2)
+                            )}
+                          </td>
+                          <td className="px-2 py-3">
+                            {isEditing ? (
+                              <input
+                                className="w-24 rounded-lg border border-slate-200 px-2 py-1"
+                                value={editEtsyPrice}
+                                onChange={(e) => setEditEtsyPrice(e.target.value)}
+                                inputMode="decimal"
+                                placeholder="-"
+                              />
+                            ) : product.etsy_price == null ? (
+                              "-"
+                            ) : (
+                              product.etsy_price.toFixed(2)
+                            )}
+                          </td>
+                          <td className="px-2 py-3">
+                            <div className="flex items-center gap-2">
+                              {primaryImage ? (
+                                <img
+                                  src={getPublicImageUrl(primaryImage.storage_path)}
+                                  alt={product.title}
+                                  className="h-10 w-10 rounded-lg border border-slate-200 object-cover"
+                                />
+                              ) : (
+                                <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-[10px] text-slate-500">
+                                  No img
+                                </div>
+                              )}
+                              <span className="text-xs text-slate-600">{mediaList.length}</span>
+                            </div>
+                          </td>
+	                        <td className="px-2 py-3">
+	                          <div className="flex flex-wrap gap-2">
                             {isEditing ? (
                               <>
                                 <button
@@ -1016,14 +1424,21 @@ export default function ProductsPage() {
                               </>
                             ) : (
                               <>
-                                <button
-                                  type="button"
-                                  className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-indigo-200 hover:text-indigo-700"
-                                  onClick={() => startEdit(product)}
-                                >
-                                  Edit
-                                </button>
-                                {product.is_active && (
+	                                <button
+	                                  type="button"
+	                                  className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-indigo-200 hover:text-indigo-700"
+	                                  onClick={() => startEdit(product)}
+	                                >
+	                                  Edit
+	                                </button>
+                                  <button
+                                    type="button"
+                                    className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-slate-400"
+                                    onClick={() => openMediaManager(product)}
+                                  >
+                                    Media
+                                  </button>
+	                                {product.is_active && (
                                   <button
                                     type="button"
                                     className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
@@ -1176,6 +1591,39 @@ export default function ProductsPage() {
                 />
               </div>
 
+              <div className="grid gap-3 md:grid-cols-3">
+                <div>
+                  <label className="text-sm font-medium text-slate-700">Base price</label>
+                  <input
+                    className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                    value={basePrice}
+                    onChange={(e) => setBasePrice(e.target.value)}
+                    placeholder="0.00"
+                    inputMode="decimal"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-700">Woo price (optional)</label>
+                  <input
+                    className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                    value={wooPrice}
+                    onChange={(e) => setWooPrice(e.target.value)}
+                    placeholder="Use base price"
+                    inputMode="decimal"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-700">Etsy price (optional)</label>
+                  <input
+                    className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                    value={etsyPrice}
+                    onChange={(e) => setEtsyPrice(e.target.value)}
+                    placeholder="Use base price"
+                    inputMode="decimal"
+                  />
+                </div>
+              </div>
+
               <label className="flex items-center gap-2 text-sm text-slate-700">
                 <input checked={isActive} onChange={(e) => setIsActive(e.target.checked)} type="checkbox" />
                 Active
@@ -1189,6 +1637,85 @@ export default function ProductsPage() {
                 {saving ? "Saving..." : "Create product"}
               </button>
             </form>
+          </article>
+        </div>
+      )}
+
+      {mediaProduct && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/40 p-4" onClick={closeMediaManager}>
+          <article
+            className="mx-auto my-6 w-full max-w-4xl max-h-[88vh] overflow-y-auto rounded-3xl border border-slate-200 bg-white p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900">Product Media</h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  {mediaProduct.sku} - {mediaProduct.title}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700"
+                onClick={closeMediaManager}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Upload images</label>
+              <input
+                className="mt-2 block w-full text-sm text-slate-700 file:mr-3 file:rounded-full file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-slate-800"
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={handleUploadMedia}
+                disabled={mediaUploading}
+              />
+              {mediaUploading && <p className="mt-2 text-xs text-slate-500">Uploading images...</p>}
+              {mediaLoading && <p className="mt-2 text-xs text-slate-500">Loading existing images...</p>}
+              {mediaMsg && <p className="mt-2 text-xs text-slate-600">{mediaMsg}</p>}
+            </div>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {currentMediaList.length === 0 ? (
+                <p className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-500">
+                  No images uploaded yet.
+                </p>
+              ) : (
+                currentMediaList.map((image) => (
+                  <article key={image.id} className="rounded-2xl border border-slate-200 bg-white p-3">
+                    <img
+                      src={getPublicImageUrl(image.storage_path)}
+                      alt={`${mediaProduct.title} media`}
+                      className="h-40 w-full rounded-xl border border-slate-200 object-cover"
+                    />
+                    <div className="mt-3 flex items-center justify-between gap-2">
+                      <span className="text-xs text-slate-500">{image.is_primary ? "Cover image" : "Image"}</span>
+                      <div className="flex gap-2">
+                        {!image.is_primary && (
+                          <button
+                            type="button"
+                            className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-slate-400"
+                            onClick={() => handleSetPrimaryImage(image)}
+                          >
+                            Set cover
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
+                          onClick={() => handleDeleteImage(image)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  </article>
+                ))
+              )}
+            </div>
           </article>
         </div>
       )}
@@ -1254,3 +1781,4 @@ export default function ProductsPage() {
     </section>
   );
 }
+
