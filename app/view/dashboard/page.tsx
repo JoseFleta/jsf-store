@@ -1,5 +1,5 @@
-import { redirect } from "next/navigation";
+import ManagementDashboardPage from "./_components/ManagementDashboardPage";
 
 export default function DashboardPage() {
-  redirect("/view/dashboard/products");
+  return <ManagementDashboardPage />;
 }

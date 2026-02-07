@@ -28,6 +28,11 @@ export default function DashboardLayout({
   const [loadingStores, setLoadingStores] = useState(true);
 
   const selectedStoreId = searchParams.get("store") || "";
+  const isActivePath = (path: string) => pathname === path || pathname.startsWith(`${path}/`);
+  const navItemClass = (active: boolean) =>
+    active
+      ? "rounded-full bg-indigo-100 px-3 py-1 text-indigo-800 shadow-sm ring-1 ring-indigo-200"
+      : "rounded-full px-3 py-1 transition hover:bg-indigo-50 hover:text-indigo-700";
 
   const storeAwareHref = useMemo(() => {
     const build = (path: string) => {
@@ -35,6 +40,7 @@ export default function DashboardLayout({
       return `${path}?store=${encodeURIComponent(selectedStoreId)}`;
     };
     return {
+      home: build("/view/dashboard"),
       products: build("/view/dashboard/products"),
       purchases: build("/view/dashboard/purchases"),
       sales: build("/view/dashboard/sales"),
@@ -42,6 +48,20 @@ export default function DashboardLayout({
       settings: build("/view/dashboard/settings"),
     };
   }, [selectedStoreId]);
+
+  const selectedStoreName = useMemo(() => {
+    return stores.find((store) => store.id === selectedStoreId)?.name || "Store";
+  }, [stores, selectedStoreId]);
+
+  const selectedStoreInitials = useMemo(() => {
+    const parts = selectedStoreName
+      .trim()
+      .split(/\s+/)
+      .map((part) => part.replace(/[^A-Za-z0-9]/g, ""))
+      .filter((part) => part.length > 0);
+    if (parts.length === 0) return "S";
+    return parts.map((part) => part[0].toUpperCase()).join("");
+  }, [selectedStoreName]);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
@@ -106,36 +126,43 @@ export default function DashboardLayout({
       <nav className="sticky top-0 z-10 border-b border-slate-200 bg-white/80 backdrop-blur">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-6 px-6 py-4">
           <div className="flex flex-wrap items-center gap-3 text-sm font-medium text-slate-700">
-            <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-indigo-700">
-              Stock SaaS
-            </span>
+            <Link
+              href={storeAwareHref.home}
+              className={
+                isActivePath("/view/dashboard") && !isActivePath("/view/dashboard/products") && !isActivePath("/view/dashboard/purchases") && !isActivePath("/view/dashboard/sales") && !isActivePath("/view/dashboard/stock") && !isActivePath("/view/dashboard/settings")
+                  ? "rounded-full bg-indigo-100 px-3 py-1 text-xs font-semibold tracking-wide text-indigo-800 shadow-sm ring-1 ring-indigo-200"
+                  : "rounded-full bg-indigo-50 px-3 py-1 text-xs font-semibold tracking-wide text-indigo-700 transition hover:bg-indigo-100"
+              }
+            >
+              {selectedStoreInitials} Management
+            </Link>
             <Link
               href={storeAwareHref.products}
-              className="rounded-full px-3 py-1 transition hover:bg-indigo-50 hover:text-indigo-700"
+              className={navItemClass(isActivePath("/view/dashboard/products"))}
             >
               Products
             </Link>
             <Link
               href={storeAwareHref.purchases}
-              className="rounded-full px-3 py-1 transition hover:bg-indigo-50 hover:text-indigo-700"
+              className={navItemClass(isActivePath("/view/dashboard/purchases"))}
             >
               Purchases
             </Link>
             <Link
               href={storeAwareHref.sales}
-              className="rounded-full px-3 py-1 transition hover:bg-indigo-50 hover:text-indigo-700"
+              className={navItemClass(isActivePath("/view/dashboard/sales"))}
             >
               Sales
             </Link>
             <Link
               href={storeAwareHref.stock}
-              className="rounded-full px-3 py-1 transition hover:bg-indigo-50 hover:text-indigo-700"
+              className={navItemClass(isActivePath("/view/dashboard/stock"))}
             >
               Stock
             </Link>
             <Link
               href={storeAwareHref.settings}
-              className="rounded-full px-3 py-1 transition hover:bg-indigo-50 hover:text-indigo-700"
+              className={navItemClass(isActivePath("/view/dashboard/settings"))}
             >
               Settings
             </Link>

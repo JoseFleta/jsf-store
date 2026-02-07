@@ -6,6 +6,8 @@ import { supabaseBrowser } from "../../../../lib/supabaseBrowser";
 
 type ProductType = "ropa" | "maquetas" | "accesorios";
 type ProductTypeFilter = "all" | ProductType;
+type SortDirection = "asc" | "desc";
+type ProductSortKey = "sku" | "title" | "type" | "subtype" | "tagline";
 
 type ProductRow = {
   id: string;
@@ -97,6 +99,10 @@ function escapeCsvValue(value: string | number | boolean | null | undefined): st
   const text = value == null ? "" : String(value);
   if (/[",\r\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
   return text;
+}
+
+function compareText(a: string, b: string): number {
+  return a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
 }
 
 function parseCsvProducts(csvText: string): { rows: CsvProduct[]; errors: string[] } {
@@ -226,6 +232,10 @@ export default function ProductsPage() {
 
   const [pageSize, setPageSize] = useState(10);
   const [page, setPage] = useState(1);
+  const [sort, setSort] = useState<{ key: ProductSortKey; direction: SortDirection } | null>({
+    key: "title",
+    direction: "asc",
+  });
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
 
   const [loadingProducts, setLoadingProducts] = useState(false);
@@ -301,7 +311,22 @@ export default function ProductsPage() {
     });
   }, [products, search, productTypeFilter]);
 
-  const totalPages = Math.max(1, Math.ceil(filteredProducts.length / pageSize));
+  const sortedProducts = useMemo(() => {
+    if (!sort) return filteredProducts;
+    const next = [...filteredProducts];
+    next.sort((a, b) => {
+      let cmp = 0;
+      if (sort.key === "sku") cmp = compareText(a.sku || "", b.sku || "");
+      if (sort.key === "title") cmp = compareText(a.title || "", b.title || "");
+      if (sort.key === "type") cmp = compareText(getTypeLabel(a.product_type), getTypeLabel(b.product_type));
+      if (sort.key === "subtype") cmp = compareText(getProductSubtype(a, productTypeFilter), getProductSubtype(b, productTypeFilter));
+      if (sort.key === "tagline") cmp = compareText(a.catchy_phrase || "", b.catchy_phrase || "");
+      return sort.direction === "asc" ? cmp : -cmp;
+    });
+    return next;
+  }, [filteredProducts, sort, productTypeFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(sortedProducts.length / pageSize));
 
   useEffect(() => {
     setPage(1);
@@ -317,8 +342,8 @@ export default function ProductsPage() {
 
   const paginatedProducts = useMemo(() => {
     const start = (page - 1) * pageSize;
-    return filteredProducts.slice(start, start + pageSize);
-  }, [filteredProducts, page, pageSize]);
+    return sortedProducts.slice(start, start + pageSize);
+  }, [sortedProducts, page, pageSize]);
 
   const isAllCurrentPageSelected = useMemo(() => {
     return paginatedProducts.length > 0 && paginatedProducts.every((p) => selectedProductIds.includes(p.id));
@@ -329,6 +354,18 @@ export default function ProductsPage() {
     const active = filteredProducts.filter((p) => p.is_active).length;
     return { total, active };
   }, [filteredProducts]);
+
+  const toggleSort = (key: ProductSortKey) => {
+    setSort((prev) => {
+      if (!prev || prev.key !== key) return { key, direction: "asc" };
+      return { key, direction: prev.direction === "asc" ? "desc" : "asc" };
+    });
+  };
+
+  const getSortArrow = (key: ProductSortKey) => {
+    if (!sort || sort.key !== key) return "↕";
+    return sort.direction === "asc" ? "↑" : "↓";
+  };
 
   const downloadCsvTemplate = () => {
     const sample = [
@@ -349,7 +386,7 @@ export default function ProductsPage() {
 
   const downloadFilteredProductsCsv = () => {
     const headers = ["sku", "title", "product_type", "type_detail", "tagline", "is_active", "created_at"];
-    const lines = filteredProducts.map((product) =>
+    const lines = sortedProducts.map((product) =>
       [
         product.sku,
         product.title,
@@ -799,12 +836,31 @@ export default function ProductsPage() {
                         aria-label="Select page"
                       />
                     </th>
-                    <th className="px-2 py-3">SKU</th>
-                    <th className="px-2 py-3">Title</th>
-                    <th className="px-2 py-3">Tipo</th>
-                    <th className="px-2 py-3">{getSubtypeLabel(productTypeFilter)}</th>
-                    <th className="px-2 py-3">Tagline</th>
-                    <th className="px-2 py-3">Status</th>
+                    <th className="px-2 py-3">
+                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("sku")}>
+                        SKU <span>{getSortArrow("sku")}</span>
+                      </button>
+                    </th>
+                    <th className="px-2 py-3">
+                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("title")}>
+                        Title <span>{getSortArrow("title")}</span>
+                      </button>
+                    </th>
+                    <th className="px-2 py-3">
+                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("type")}>
+                        Tipo <span>{getSortArrow("type")}</span>
+                      </button>
+                    </th>
+                    <th className="px-2 py-3">
+                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("subtype")}>
+                        {getSubtypeLabel(productTypeFilter)} <span>{getSortArrow("subtype")}</span>
+                      </button>
+                    </th>
+                    <th className="px-2 py-3">
+                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("tagline")}>
+                        Tagline <span>{getSortArrow("tagline")}</span>
+                      </button>
+                    </th>
                     <th className="px-2 py-3">Actions</th>
                   </tr>
                 </thead>
@@ -895,24 +951,6 @@ export default function ProductsPage() {
                             />
                           ) : (
                             product.catchy_phrase || "-"
-                          )}
-                        </td>
-                        <td className="px-2 py-3">
-                          {isEditing ? (
-                            <label className="inline-flex items-center gap-2 text-xs">
-                              <input type="checkbox" checked={editActive} onChange={(e) => setEditActive(e.target.checked)} />
-                              Active
-                            </label>
-                          ) : (
-                            <span
-                              className={
-                                product.is_active
-                                  ? "rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700"
-                                  : "rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600"
-                              }
-                            >
-                              {product.is_active ? "Active" : "Inactive"}
-                            </span>
                           )}
                         </td>
                         <td className="px-2 py-3">

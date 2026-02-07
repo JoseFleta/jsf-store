@@ -6,6 +6,8 @@ import { supabaseBrowser } from "../../../../lib/supabaseBrowser";
 
 type ProductType = "ropa" | "maquetas" | "accesorios";
 type ProductTypeFilter = "all" | ProductType;
+type SortDirection = "asc" | "desc";
+type StockSortKey = "product" | "type" | "subtype" | "inflow" | "outflow" | "stock";
 
 type ProductRow = {
   id: string;
@@ -54,6 +56,10 @@ function escapeCsvValue(value: string | number | boolean | null | undefined): st
   return text;
 }
 
+function compareText(a: string, b: string): number {
+  return a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
+}
+
 export default function StockPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -67,6 +73,10 @@ export default function StockPage() {
   const [productTypeFilter, setProductTypeFilter] = useState<ProductTypeFilter>("all");
   const [pageSize, setPageSize] = useState(25);
   const [page, setPage] = useState(1);
+  const [sort, setSort] = useState<{ key: StockSortKey; direction: SortDirection } | null>({
+    key: "stock",
+    direction: "desc",
+  });
   const [selectedSyncSkus, setSelectedSyncSkus] = useState<string[]>([]);
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(true);
@@ -190,7 +200,23 @@ export default function StockPage() {
     });
   }, [stockRows, search, productTypeFilter]);
 
-  const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const sortedRows = useMemo(() => {
+    if (!sort) return filteredRows;
+    const next = [...filteredRows];
+    next.sort((a, b) => {
+      let cmp = 0;
+      if (sort.key === "product") cmp = compareText(a.name || "", b.name || "");
+      if (sort.key === "type") cmp = compareText(getTypeLabel(a.product_type), getTypeLabel(b.product_type));
+      if (sort.key === "subtype") cmp = compareText(getSubtypeValue(a, productTypeFilter), getSubtypeValue(b, productTypeFilter));
+      if (sort.key === "inflow") cmp = a.inQty - b.inQty;
+      if (sort.key === "outflow") cmp = a.outQty - b.outQty;
+      if (sort.key === "stock") cmp = a.stock - b.stock;
+      return sort.direction === "asc" ? cmp : -cmp;
+    });
+    return next;
+  }, [filteredRows, sort, productTypeFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(sortedRows.length / pageSize));
 
   useEffect(() => {
     setPage(1);
@@ -206,8 +232,8 @@ export default function StockPage() {
 
   const paginatedRows = useMemo(() => {
     const start = (page - 1) * pageSize;
-    return filteredRows.slice(start, start + pageSize);
-  }, [filteredRows, page, pageSize]);
+    return sortedRows.slice(start, start + pageSize);
+  }, [sortedRows, page, pageSize]);
 
   const isAllCurrentPageSelected = useMemo(() => {
     return paginatedRows.length > 0 && paginatedRows.every((row) => selectedSyncSkus.includes(row.sku));
@@ -225,9 +251,21 @@ export default function StockPage() {
     return { inQty, outQty, stock };
   }, [filteredRows]);
 
+  const toggleSort = (key: StockSortKey) => {
+    setSort((prev) => {
+      if (!prev || prev.key !== key) return { key, direction: "asc" };
+      return { key, direction: prev.direction === "asc" ? "desc" : "asc" };
+    });
+  };
+
+  const getSortArrow = (key: StockSortKey) => {
+    if (!sort || sort.key !== key) return "↕";
+    return sort.direction === "asc" ? "↑" : "↓";
+  };
+
   const downloadFilteredStockCsv = () => {
     const headers = ["sku", "product", "type", "type_detail", "inflow", "outflow", "stock", "is_active"];
-    const lines = filteredRows.map((row) =>
+    const lines = sortedRows.map((row) =>
       [
         row.sku,
         row.name,
@@ -392,7 +430,7 @@ export default function StockPage() {
             <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Search</label>
             <input
               className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
-              placeholder="Search by SKU, name, or detail"
+              placeholder="Search by name or detail"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
@@ -458,13 +496,36 @@ export default function StockPage() {
                       aria-label="Select page"
                     />
                   </th>
-                  <th className="px-2 py-3">SKU</th>
-                  <th className="px-2 py-3">Product</th>
-                  <th className="px-2 py-3">Type</th>
-                  <th className="px-2 py-3">{getSubtypeLabel(productTypeFilter)}</th>
-                  <th className="px-2 py-3">Inflow</th>
-                  <th className="px-2 py-3">Outflow</th>
-                  <th className="px-2 py-3">Stock</th>
+                  <th className="px-2 py-3">
+                    <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("product")}>
+                      Product <span>{getSortArrow("product")}</span>
+                    </button>
+                  </th>
+                  <th className="px-2 py-3">
+                    <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("type")}>
+                      Type <span>{getSortArrow("type")}</span>
+                    </button>
+                  </th>
+                  <th className="px-2 py-3">
+                    <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("subtype")}>
+                      {getSubtypeLabel(productTypeFilter)} <span>{getSortArrow("subtype")}</span>
+                    </button>
+                  </th>
+                  <th className="px-2 py-3">
+                    <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("inflow")}>
+                      Inflow <span>{getSortArrow("inflow")}</span>
+                    </button>
+                  </th>
+                  <th className="px-2 py-3">
+                    <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("outflow")}>
+                      Outflow <span>{getSortArrow("outflow")}</span>
+                    </button>
+                  </th>
+                  <th className="px-2 py-3">
+                    <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("stock")}>
+                      Stock <span>{getSortArrow("stock")}</span>
+                    </button>
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -478,7 +539,6 @@ export default function StockPage() {
                         aria-label={`Select ${row.sku}`}
                       />
                     </td>
-                    <td className="px-2 py-3 font-medium">{row.sku}</td>
                     <td className="px-2 py-3">{row.name}</td>
                     <td className="px-2 py-3">{getTypeLabel(row.product_type)}</td>
                     <td className="px-2 py-3">{getSubtypeValue(row, productTypeFilter)}</td>

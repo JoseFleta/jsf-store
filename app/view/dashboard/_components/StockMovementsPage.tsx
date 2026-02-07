@@ -9,6 +9,8 @@ import { supabaseBrowser } from "../../../../lib/supabaseBrowser";
 type MovementType = "purchase" | "sale";
 type ProductType = "ropa" | "maquetas" | "accesorios";
 type ProductTypeFilter = "all" | ProductType;
+type SortDirection = "asc" | "desc";
+type MovementSortKey = "date" | "product" | "type" | "subtype" | "qty" | "amount" | "channel";
 
 type StockMovementsPageProps = {
   movementType: MovementType;
@@ -125,6 +127,10 @@ function escapeCsvValue(value: string | number | boolean | null | undefined): st
   const text = value == null ? "" : String(value);
   if (/[",\r\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
   return text;
+}
+
+function compareText(a: string, b: string): number {
+  return a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
 }
 
 function toIsoDate(value: Date): string {
@@ -268,6 +274,10 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
   const [productTypeFilter, setProductTypeFilter] = useState<ProductTypeFilter>("all");
   const [pageSize, setPageSize] = useState(10);
   const [page, setPage] = useState(1);
+  const [sort, setSort] = useState<{ key: MovementSortKey; direction: SortDirection } | null>({
+    key: "date",
+    direction: "desc",
+  });
   const [selectedRowIds, setSelectedRowIds] = useState<string[]>([]);
 
   const [editingRowId, setEditingRowId] = useState<string | null>(null);
@@ -492,11 +502,28 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     });
   }, [rows, search, productTypeFilter, channelFilter, dateRange]);
 
+  const sortedRows = useMemo(() => {
+    if (!sort) return filteredRows;
+    const next = [...filteredRows];
+    next.sort((a, b) => {
+      let cmp = 0;
+      if (sort.key === "date") cmp = compareText(a.occurred_on || "", b.occurred_on || "");
+      if (sort.key === "product") cmp = compareText(getProductName(a.products), getProductName(b.products));
+      if (sort.key === "type") cmp = compareText(getTypeLabel(getProductType(a.products) ?? "all"), getTypeLabel(getProductType(b.products) ?? "all"));
+      if (sort.key === "subtype") cmp = compareText(getProductSubtype(a.products, productTypeFilter), getProductSubtype(b.products, productTypeFilter));
+      if (sort.key === "qty") cmp = Number(a.quantity || 0) - Number(b.quantity || 0);
+      if (sort.key === "amount") cmp = Number(a.unit_price || 0) - Number(b.unit_price || 0);
+      if (sort.key === "channel") cmp = compareText(a.channel || "", b.channel || "");
+      return sort.direction === "asc" ? cmp : -cmp;
+    });
+    return next;
+  }, [filteredRows, sort, productTypeFilter]);
+
   const filteredProducts = useMemo(() => {
     return products.filter((p) => (productTypeFilter === "all" ? true : p.product_type === productTypeFilter));
   }, [products, productTypeFilter]);
 
-  const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const totalPages = Math.max(1, Math.ceil(sortedRows.length / pageSize));
 
   useEffect(() => {
     setPage(1);
@@ -523,8 +550,8 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
 
   const paginatedRows = useMemo(() => {
     const start = (page - 1) * pageSize;
-    return filteredRows.slice(start, start + pageSize);
-  }, [filteredRows, page, pageSize]);
+    return sortedRows.slice(start, start + pageSize);
+  }, [sortedRows, page, pageSize]);
 
   const isAllCurrentPageSelected = useMemo(() => {
     return paginatedRows.length > 0 && paginatedRows.every((row) => selectedRowIds.includes(row.id));
@@ -539,6 +566,18 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     }
     return { qty, amount };
   }, [filteredRows]);
+
+  const toggleSort = (key: MovementSortKey) => {
+    setSort((prev) => {
+      if (!prev || prev.key !== key) return { key, direction: "asc" };
+      return { key, direction: prev.direction === "asc" ? "desc" : "asc" };
+    });
+  };
+
+  const getSortArrow = (key: MovementSortKey) => {
+    if (!sort || sort.key !== key) return "↕";
+    return sort.direction === "asc" ? "↑" : "↓";
+  };
 
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault();
@@ -607,7 +646,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
 
   const downloadFilteredRowsCsv = () => {
     const headers = ["date", "sku", "product", "type", "type_detail", "quantity", "total_amount", "channel"];
-    const lines = filteredRows.map((row) =>
+    const lines = sortedRows.map((row) =>
       [
         row.occurred_on,
         getProductSku(row.products),
@@ -889,18 +928,36 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
             <div className="relative mt-2">
               <button
                 type="button"
-                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-left text-sm text-slate-700"
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pr-10 text-left text-sm text-slate-700"
                 onClick={() => setIsDateRangeOpen((prev) => !prev)}
               >
                 {formatRangeLabel(dateRange)}
               </button>
+              {(dateRange?.from || dateRange?.to) && (
+                <button
+                  type="button"
+                  aria-label="Clear date range"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full border border-slate-200 bg-white px-1.5 py-0.5 text-xs font-semibold leading-none text-slate-500 hover:text-slate-700"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDateRange(undefined);
+                  }}
+                >
+                  x
+                </button>
+              )}
               {isDateRangeOpen && (
                 <div className="absolute z-20 mt-2 rounded-2xl border border-slate-200 bg-white p-3 shadow-xl">
                   <DayPicker
                     mode="range"
                     min={1}
                     selected={dateRange}
-                    onSelect={(range) => {
+                    onSelect={(range, selectedDay) => {
+                      if (dateRange?.from && dateRange?.to) {
+                        setDateRange({ from: selectedDay, to: undefined });
+                        return;
+                      }
                       setDateRange(range);
                       if (range?.from && range?.to) setIsDateRangeOpen(false);
                     }}
@@ -942,7 +999,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
             <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Search</label>
             <input
               className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
-              placeholder="SKU, product, channel"
+              placeholder="Product, type detail, or channel"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
@@ -969,7 +1026,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
           <div className="flex items-end justify-between gap-3">
             <div>
               <h2 className="text-lg font-semibold text-slate-900">{pageTitle}</h2>
-              <p className="mt-1 text-sm text-slate-500">Date, SKU, product, quantity and price.</p>
+              <p className="mt-1 text-sm text-slate-500">Date, product, quantity and price.</p>
             </div>
             <div className="flex items-end gap-3">
               <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
@@ -1019,14 +1076,41 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
                         aria-label="Select page"
                       />
                     </th>
-                    <th className="px-2 py-3">Date</th>
-                    <th className="px-2 py-3">SKU</th>
-                    <th className="px-2 py-3">Product</th>
-                    <th className="px-2 py-3">Type</th>
-                    <th className="px-2 py-3">{getSubtypeLabel(productTypeFilter)}</th>
-                    <th className="px-2 py-3">Qty</th>
-                    <th className="px-2 py-3">Total amount</th>
-                    <th className="px-2 py-3">Channel</th>
+                    <th className="px-2 py-3">
+                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("date")}>
+                        Date <span>{getSortArrow("date")}</span>
+                      </button>
+                    </th>
+                    <th className="px-2 py-3">
+                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("product")}>
+                        Product <span>{getSortArrow("product")}</span>
+                      </button>
+                    </th>
+                    <th className="px-2 py-3">
+                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("type")}>
+                        Type <span>{getSortArrow("type")}</span>
+                      </button>
+                    </th>
+                    <th className="px-2 py-3">
+                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("subtype")}>
+                        {getSubtypeLabel(productTypeFilter)} <span>{getSortArrow("subtype")}</span>
+                      </button>
+                    </th>
+                    <th className="px-2 py-3">
+                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("qty")}>
+                        Qty <span>{getSortArrow("qty")}</span>
+                      </button>
+                    </th>
+                    <th className="px-2 py-3">
+                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("amount")}>
+                        Total amount <span>{getSortArrow("amount")}</span>
+                      </button>
+                    </th>
+                    <th className="px-2 py-3">
+                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("channel")}>
+                        Channel <span>{getSortArrow("channel")}</span>
+                      </button>
+                    </th>
                     <th className="px-2 py-3">Actions</th>
                   </tr>
                 </thead>
@@ -1057,7 +1141,6 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
                             row.occurred_on
                           )}
                         </td>
-                        <td className="px-2 py-3 font-medium">{getProductSku(row.products)}</td>
                         <td className="px-2 py-3">
                           {isEditing ? (
                             <select
