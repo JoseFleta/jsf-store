@@ -6,6 +6,9 @@ import { supabaseBrowser } from "../../../../lib/supabaseBrowser";
 
 type ProductType = "ropa" | "maquetas" | "accesorios";
 type ProductTypeFilter = "all" | ProductType;
+type ViewMode = "card" | "table";
+type BulkImportPlatform = "woocommerce" | "etsy";
+type BulkPriceImportPlatform = "woocommerce" | "etsy" | "both";
 type SortDirection = "asc" | "desc";
 type ProductSortKey = "sku" | "title" | "type" | "subtype" | "tagline";
 
@@ -123,6 +126,11 @@ function compareText(a: string, b: string): number {
 
 function sanitizeFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+function buildMediaStoragePath(storeId: string, productId: string, fileName: string): string {
+  const salt = Math.random().toString(36).slice(2, 8);
+  return `${storeId}/${productId}/${Date.now()}-${salt}-${sanitizeFileName(fileName)}`;
 }
 
 function parsePriceInput(raw: string): number | null {
@@ -297,7 +305,24 @@ export default function ProductsPage() {
     key: "title",
     direction: "asc",
   });
+  const [viewMode, setViewMode] = useState<ViewMode>("card");
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
+  const [previewGallery, setPreviewGallery] = useState<{ urls: string[]; title: string; index: number } | null>(null);
+  const [createMediaFiles, setCreateMediaFiles] = useState<File[]>([]);
+  const [isAdvancedModalOpen, setIsAdvancedModalOpen] = useState(false);
+  const [bulkBasePrice, setBulkBasePrice] = useState("");
+  const [bulkWooPrice, setBulkWooPrice] = useState("");
+  const [bulkEtsyPrice, setBulkEtsyPrice] = useState("");
+  const [bulkImportPlatform, setBulkImportPlatform] = useState<BulkImportPlatform>("etsy");
+  const [bulkPriceImportPlatform, setBulkPriceImportPlatform] = useState<BulkPriceImportPlatform>("both");
+  const [bulkPriceImportToBase, setBulkPriceImportToBase] = useState(false);
+  const [applyingBulkPrices, setApplyingBulkPrices] = useState(false);
+  const [importingMarketplaceImages, setImportingMarketplaceImages] = useState(false);
+  const [importingMarketplacePrices, setImportingMarketplacePrices] = useState(false);
+  const [progressModal, setProgressModal] = useState<{ title: string; detail: string; percent: number } | null>(null);
+  const [isImageImportPromptOpen, setIsImageImportPromptOpen] = useState(false);
+  const [useImageFallback, setUseImageFallback] = useState(true);
+  const [successModal, setSuccessModal] = useState<{ title: string; message: string } | null>(null);
 
   const [loadingProducts, setLoadingProducts] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -308,9 +333,11 @@ export default function ProductsPage() {
   const [msg, setMsg] = useState("");
   const [csvErrors, setCsvErrors] = useState<string[]>([]);
   const [productImagesByProductId, setProductImagesByProductId] = useState<Record<string, ProductImageRow[]>>({});
-  const [mediaProduct, setMediaProduct] = useState<ProductRow | null>(null);
   const [mediaLoading, setMediaLoading] = useState(false);
   const [mediaUploading, setMediaUploading] = useState(false);
+  const [mediaReordering, setMediaReordering] = useState(false);
+  const [draggingImageId, setDraggingImageId] = useState<string | null>(null);
+  const [dragOverImageId, setDragOverImageId] = useState<string | null>(null);
   const [mediaMsg, setMediaMsg] = useState("");
 
   useEffect(() => {
@@ -451,10 +478,13 @@ export default function ProductsPage() {
     const start = (page - 1) * pageSize;
     return sortedProducts.slice(start, start + pageSize);
   }, [sortedProducts, page, pageSize]);
-
   const isAllCurrentPageSelected = useMemo(() => {
     return paginatedProducts.length > 0 && paginatedProducts.every((p) => selectedProductIds.includes(p.id));
   }, [paginatedProducts, selectedProductIds]);
+  const isAllFilteredSelected = useMemo(() => {
+    if (filteredProducts.length === 0) return false;
+    return filteredProducts.every((product) => selectedProductIds.includes(product.id));
+  }, [filteredProducts, selectedProductIds]);
 
   const stats = useMemo(() => {
     const total = filteredProducts.length;
@@ -462,23 +492,30 @@ export default function ProductsPage() {
     return { total, active };
   }, [filteredProducts]);
   const hasActiveFilters = productTypeFilter !== "all" || search.trim().length > 0;
-  const currentMediaList = mediaProduct ? productImagesByProductId[mediaProduct.id] || [] : [];
+  const editingProduct = useMemo(
+    () => (editingId ? products.find((product) => product.id === editingId) || null : null),
+    [editingId, products],
+  );
+  const currentMediaList = editingProduct ? productImagesByProductId[editingProduct.id] || [] : [];
+  const anyAdvancedWorking = applyingBulkPrices || importingMarketplaceImages || importingMarketplacePrices;
 
   const getPublicImageUrl = (storagePath: string) => {
     const { data } = supabase.storage.from("product-images").getPublicUrl(storagePath);
     return data.publicUrl;
   };
-
-  const toggleSort = (key: ProductSortKey) => {
-    setSort((prev) => {
-      if (!prev || prev.key !== key) return { key, direction: "asc" };
-      return { key, direction: prev.direction === "asc" ? "desc" : "asc" };
-    });
+  const showSuccess = (title: string, message: string) => {
+    setSuccessModal({ title, message });
   };
-
-  const getSortArrow = (key: ProductSortKey) => {
-    if (!sort || sort.key !== key) return "↕";
-    return sort.direction === "asc" ? "↑" : "↓";
+  const fallbackPlatform = bulkImportPlatform === "etsy" ? "woocommerce" : "etsy";
+  const openImagePreview = (images: ProductImageRow[], title: string, selectedPath: string) => {
+    if (images.length === 0) return;
+    const urls = images.map((image) => getPublicImageUrl(image.storage_path));
+    const selectedIndex = images.findIndex((image) => image.storage_path === selectedPath);
+    setPreviewGallery({
+      urls,
+      title,
+      index: selectedIndex >= 0 ? selectedIndex : 0,
+    });
   };
 
   const downloadCsvTemplate = () => {
@@ -575,11 +612,23 @@ export default function ProductsPage() {
       })
       .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,base_price,woo_price,etsy_price,is_active,created_at")
       .single();
-    setSaving(false);
 
     if (error) {
+      setSaving(false);
       setMsg(error.message);
       return;
+    }
+
+    let createMediaSummary = "";
+    if (createMediaFiles.length > 0) {
+      const uploadResult = await uploadMediaFilesForProduct(data.id, createMediaFiles);
+      if (uploadResult.uploadedCount > 0) {
+        await refreshProductImages();
+        createMediaSummary = ` ${uploadResult.uploadedCount} image(s) uploaded.`;
+      }
+      if (uploadResult.errors.length > 0) {
+        createMediaSummary = ` Product created, but media upload had issues: ${uploadResult.errors[0]}`;
+      }
     }
 
     setProducts((prev) => [normalizeProductRow(data as ProductRow), ...prev]);
@@ -594,8 +643,10 @@ export default function ProductsPage() {
     setWooPrice("");
     setEtsyPrice("");
     setIsActive(true);
+    setCreateMediaFiles([]);
     setIsCreateModalOpen(false);
-    setMsg("Product created.");
+    setMsg(`Product created.${createMediaSummary}`);
+    setSaving(false);
   };
 
   const startEdit = (product: ProductRow) => {
@@ -628,6 +679,7 @@ export default function ProductsPage() {
     setEditWooPrice("");
     setEditEtsyPrice("");
     setEditActive(true);
+    setMediaMsg("");
   };
 
   const handleSaveEdit = async () => {
@@ -794,7 +846,6 @@ export default function ProductsPage() {
       return prev.filter((id) => id !== productId);
     });
   };
-
   const toggleSelectCurrentPage = (checked: boolean) => {
     const pageIds = paginatedProducts.map((p) => p.id);
     if (checked) {
@@ -802,6 +853,13 @@ export default function ProductsPage() {
       return;
     }
     setSelectedProductIds((prev) => prev.filter((id) => !pageIds.includes(id)));
+  };
+  const toggleSelectAllFiltered = (checked: boolean) => {
+    if (checked) {
+      setSelectedProductIds(filteredProducts.map((product) => product.id));
+      return;
+    }
+    setSelectedProductIds([]);
   };
 
   const handleBulkSetActive = async (nextActive: boolean) => {
@@ -843,6 +901,279 @@ export default function ProductsPage() {
     setProducts((prev) => prev.filter((p) => !selectedProductIds.includes(p.id)));
     setMsg("Products deleted.");
     setSelectedProductIds([]);
+  };
+
+  const handleBulkUpdatePrices = async () => {
+    if (!selectedStoreId || selectedProductIds.length === 0) return;
+
+    const nextBasePrice = bulkBasePrice.trim() === "" ? undefined : parsePriceInput(bulkBasePrice);
+    const nextWooPrice = bulkWooPrice.trim() === "" ? undefined : parsePriceInput(bulkWooPrice);
+    const nextEtsyPrice = bulkEtsyPrice.trim() === "" ? undefined : parsePriceInput(bulkEtsyPrice);
+
+    if (nextBasePrice === null || nextWooPrice === null || nextEtsyPrice === null) {
+      setMsg("Bulk price values must be empty or numbers >= 0.");
+      return;
+    }
+
+    const payload: Record<string, number | null> = {};
+    if (nextBasePrice !== undefined) payload.base_price = nextBasePrice;
+    if (nextWooPrice !== undefined) payload.woo_price = nextWooPrice;
+    if (nextEtsyPrice !== undefined) payload.etsy_price = nextEtsyPrice;
+
+    if (Object.keys(payload).length === 0) {
+      setMsg("Add at least one price to apply in bulk.");
+      return;
+    }
+
+    setApplyingBulkPrices(true);
+    const { error } = await supabase
+      .from("products")
+      .update(payload)
+      .eq("store_id", selectedStoreId)
+      .in("id", selectedProductIds);
+    setApplyingBulkPrices(false);
+
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
+
+    setProducts((prev) =>
+      prev.map((product) => {
+        if (!selectedProductIds.includes(product.id)) return product;
+        return {
+          ...product,
+          base_price: payload.base_price == null ? product.base_price : payload.base_price,
+          woo_price: payload.woo_price === undefined ? product.woo_price : payload.woo_price,
+          etsy_price: payload.etsy_price === undefined ? product.etsy_price : payload.etsy_price,
+        };
+      }),
+    );
+
+    setMsg(`Bulk prices updated for ${selectedProductIds.length} product(s).`);
+    showSuccess("Prices Applied", `Bulk prices updated for ${selectedProductIds.length} product(s).`);
+  };
+
+  const handleBulkImportMarketplaceImages = () => {
+    if (!selectedStoreId || selectedProductIds.length === 0) return;
+    setUseImageFallback(true);
+    setIsImageImportPromptOpen(true);
+  };
+
+  const runBulkImportMarketplaceImages = async (withFallback: boolean) => {
+    if (!selectedStoreId || selectedProductIds.length === 0) return;
+
+    try {
+      setImportingMarketplaceImages(true);
+      setMsg("");
+      const { data: sessionRes } = await supabase.auth.getSession();
+      const accessToken = sessionRes.session?.access_token;
+      if (!accessToken) {
+        setImportingMarketplaceImages(false);
+        setProgressModal(null);
+        setMsg("Not authenticated.");
+        return;
+      }
+
+      const ids = [...selectedProductIds];
+      const total = ids.length;
+      let processedProducts = 0;
+      let importedProducts = 0;
+      let totalImagesImported = 0;
+      let missingSkuCount = 0;
+      let missingImageCount = 0;
+      const allErrors: string[] = [];
+
+      for (let i = 0; i < ids.length; i += 1) {
+        const productId = ids[i];
+        const pctBefore = Math.round((i / total) * 100);
+        setProgressModal({
+          title: "Importing Images",
+          detail: `Processing ${i + 1} of ${total} (${bulkImportPlatform}${withFallback ? ` -> fallback ${fallbackPlatform}` : ""})`,
+          percent: pctBefore,
+        });
+
+        const res = await fetch("/api/products/import-marketplace-images", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            storeId: selectedStoreId,
+            productIds: [productId],
+            platform: bulkImportPlatform,
+            fallbackPlatform: withFallback ? fallbackPlatform : null,
+          }),
+        });
+        const payload = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          processedProducts?: number;
+          importedProducts?: number;
+          totalImagesImported?: number;
+          missingSkuCount?: number;
+          missingImageCount?: number;
+          errors?: string[];
+        };
+
+        if (!res.ok) {
+          allErrors.push(payload.error || `Import failed for item ${i + 1}.`);
+        } else {
+          processedProducts += payload.processedProducts || 0;
+          importedProducts += payload.importedProducts || 0;
+          totalImagesImported += payload.totalImagesImported || 0;
+          missingSkuCount += payload.missingSkuCount || 0;
+          missingImageCount += payload.missingImageCount || 0;
+          if (payload.errors?.length) allErrors.push(...payload.errors);
+        }
+      }
+
+      setProgressModal({
+        title: "Importing Images",
+        detail: "Finalizing...",
+        percent: 100,
+      });
+
+      await refreshProductImages();
+      const firstError = allErrors[0] ? ` First issue: ${allErrors[0]}` : "";
+      const noImportHint =
+        importedProducts === 0
+          ? " No images were imported. Check Etsy token, shop name, SKU map/listing IDs, and listing images."
+          : "";
+      setMsg(
+        `Image import complete (${bulkImportPlatform}). Products: ${importedProducts}/${processedProducts}. Images: ${totalImagesImported}. Missing SKU map: ${missingSkuCount}. Missing images: ${missingImageCount}.${firstError}${noImportHint}`,
+      );
+      if (importedProducts > 0) {
+        showSuccess(
+          "Images Imported",
+          `${totalImagesImported} image(s) imported across ${importedProducts} product(s).`,
+        );
+      }
+    } catch (error) {
+      setImportingMarketplaceImages(false);
+      setProgressModal(null);
+      setMsg(error instanceof Error ? error.message : "Bulk image import failed.");
+      return;
+    }
+    setImportingMarketplaceImages(false);
+    setProgressModal(null);
+  };
+
+  const handleBulkImportMarketplacePrices = async () => {
+    if (!selectedStoreId || selectedProductIds.length === 0) return;
+
+    try {
+      setImportingMarketplacePrices(true);
+      setMsg("");
+      const { data: sessionRes } = await supabase.auth.getSession();
+      const accessToken = sessionRes.session?.access_token;
+      if (!accessToken) {
+        setImportingMarketplacePrices(false);
+        setProgressModal(null);
+        setMsg("Not authenticated.");
+        return;
+      }
+
+      const ids = [...selectedProductIds];
+      const total = ids.length;
+      let processedProducts = 0;
+      let updatedProducts = 0;
+      let updatedWooProducts = 0;
+      let updatedEtsyProducts = 0;
+      let missingSkuCount = 0;
+      let missingPriceCount = 0;
+      const allErrors: string[] = [];
+
+      for (let i = 0; i < ids.length; i += 1) {
+        const productId = ids[i];
+        const pctBefore = Math.round((i / total) * 100);
+        setProgressModal({
+          title: "Importing Prices",
+          detail: `Processing ${i + 1} of ${total} (${bulkPriceImportPlatform})`,
+          percent: pctBefore,
+        });
+
+        const res = await fetch("/api/products/import-marketplace-prices", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            storeId: selectedStoreId,
+            productIds: [productId],
+            platform: bulkPriceImportPlatform,
+            updateBasePrice: bulkPriceImportToBase,
+          }),
+        });
+        const payload = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          processedProducts?: number;
+          updatedProducts?: number;
+          updatedWooProducts?: number;
+          updatedEtsyProducts?: number;
+          missingSkuCount?: number;
+          missingPriceCount?: number;
+          errors?: string[];
+        };
+
+        if (!res.ok) {
+          allErrors.push(payload.error || `Import failed for item ${i + 1}.`);
+        } else {
+          processedProducts += payload.processedProducts || 0;
+          updatedProducts += payload.updatedProducts || 0;
+          updatedWooProducts += payload.updatedWooProducts || 0;
+          updatedEtsyProducts += payload.updatedEtsyProducts || 0;
+          missingSkuCount += payload.missingSkuCount || 0;
+          missingPriceCount += payload.missingPriceCount || 0;
+          if (payload.errors?.length) allErrors.push(...payload.errors);
+        }
+      }
+
+      setProgressModal({
+        title: "Importing Prices",
+        detail: "Finalizing...",
+        percent: 100,
+      });
+
+      const { data: refreshedProducts, error: refreshErr } = await supabase
+        .from("products")
+        .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,base_price,woo_price,etsy_price,is_active,created_at")
+        .eq("store_id", selectedStoreId);
+      if (!refreshErr && refreshedProducts) {
+        setProducts(
+          (refreshedProducts as Array<Partial<ProductRow> & { id: string; store_id: string }>).map(normalizeProductRow),
+        );
+      }
+
+      const firstError = allErrors[0] ? ` First issue: ${allErrors[0]}` : "";
+      const noImportHint =
+        updatedProducts === 0
+          ? " No prices were imported. Check token, SKU map/listing IDs, and marketplace product prices."
+          : "";
+      const breakdown =
+        bulkPriceImportPlatform === "both"
+          ? ` Woo updated: ${updatedWooProducts}. Etsy updated: ${updatedEtsyProducts}.`
+          : "";
+      setMsg(
+        `Price import complete (${bulkPriceImportPlatform}). Updated: ${updatedProducts}/${processedProducts}.${breakdown} Missing SKU map: ${missingSkuCount}. Missing price: ${missingPriceCount}.${firstError}${noImportHint}`,
+      );
+      if (updatedProducts > 0) {
+        showSuccess(
+          "Prices Imported",
+          bulkPriceImportPlatform === "both"
+            ? `Updated ${updatedProducts} product(s). Woo: ${updatedWooProducts}, Etsy: ${updatedEtsyProducts}.`
+            : `Updated ${updatedProducts} product(s) from ${bulkPriceImportPlatform}.`,
+        );
+      }
+    } catch (error) {
+      setImportingMarketplacePrices(false);
+      setProgressModal(null);
+      setMsg(error instanceof Error ? error.message : "Bulk price import failed.");
+      return;
+    }
+    setImportingMarketplacePrices(false);
+    setProgressModal(null);
   };
 
   const handleSyncPrices = async () => {
@@ -900,16 +1231,6 @@ export default function ProductsPage() {
     }
   };
 
-  const openMediaManager = (product: ProductRow) => {
-    setMediaMsg("");
-    setMediaProduct(product);
-  };
-
-  const closeMediaManager = () => {
-    setMediaMsg("");
-    setMediaProduct(null);
-  };
-
   const refreshProductImages = async () => {
     if (!selectedStoreId) return;
     const { data, error } = await supabase
@@ -932,37 +1253,38 @@ export default function ProductsPage() {
     setProductImagesByProductId(grouped);
   };
 
-  const handleUploadMedia = async (e: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
-    if (!mediaProduct || !selectedStoreId || files.length === 0) return;
+  const uploadMediaFilesForProduct = async (productId: string, files: File[]) => {
+    if (!selectedStoreId || files.length === 0) {
+      return { uploadedCount: 0, errors: [] as string[] };
+    }
 
-    setMediaUploading(true);
-    setMediaMsg("");
-    const startOrder = (productImagesByProductId[mediaProduct.id] || []).length;
+    const currentList = productImagesByProductId[productId] || [];
+    const startOrder = currentList.length;
     let nextOrder = startOrder;
     let uploadedCount = 0;
+    const errors: string[] = [];
 
     for (const file of files) {
-      const path = `${selectedStoreId}/${mediaProduct.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${sanitizeFileName(file.name)}`;
+      const path = buildMediaStoragePath(selectedStoreId, productId, file.name);
       const uploadRes = await supabase.storage.from("product-images").upload(path, file, {
         upsert: false,
       });
 
       if (uploadRes.error) {
-        setMediaMsg(uploadRes.error.message);
+        errors.push(uploadRes.error.message);
         continue;
       }
 
       const { error: insertError } = await supabase.from("product_images").insert({
         store_id: selectedStoreId,
-        product_id: mediaProduct.id,
+        product_id: productId,
         storage_path: path,
         sort_order: nextOrder,
         is_primary: startOrder === 0 && nextOrder === 0,
       });
 
       if (insertError) {
-        setMediaMsg(insertError.message);
+        errors.push(insertError.message);
         continue;
       }
 
@@ -970,23 +1292,38 @@ export default function ProductsPage() {
       uploadedCount += 1;
     }
 
+    return { uploadedCount, errors };
+  };
+
+  const handleUploadMedia = async (e: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (!editingProduct || !selectedStoreId || files.length === 0) return;
+
+    setMediaUploading(true);
+    setMediaMsg("");
+    const result = await uploadMediaFilesForProduct(editingProduct.id, files);
+
     await refreshProductImages();
     setMediaUploading(false);
     e.target.value = "";
-    if (uploadedCount > 0) {
-      setMediaMsg(`${uploadedCount} image(s) uploaded.`);
+    if (result.errors.length > 0) {
+      setMediaMsg(result.errors[0]);
+      return;
+    }
+    if (result.uploadedCount > 0) {
+      setMediaMsg(`${result.uploadedCount} image(s) uploaded.`);
     }
   };
 
   const handleSetPrimaryImage = async (image: ProductImageRow) => {
-    if (!mediaProduct || !selectedStoreId) return;
+    if (!editingProduct || !selectedStoreId) return;
     setMediaMsg("");
 
     const { error: clearError } = await supabase
       .from("product_images")
       .update({ is_primary: false })
       .eq("store_id", selectedStoreId)
-      .eq("product_id", mediaProduct.id);
+      .eq("product_id", editingProduct.id);
 
     if (clearError) {
       setMediaMsg(clearError.message);
@@ -1009,7 +1346,7 @@ export default function ProductsPage() {
   };
 
   const handleDeleteImage = async (image: ProductImageRow) => {
-    if (!mediaProduct || !selectedStoreId) return;
+    if (!editingProduct || !selectedStoreId) return;
     setMediaMsg("");
 
     const { error: storageError } = await supabase.storage.from("product-images").remove([image.storage_path]);
@@ -1031,6 +1368,43 @@ export default function ProductsPage() {
 
     await refreshProductImages();
     setMediaMsg("Image deleted.");
+  };
+
+  const handleReorderImages = async (draggedImageId: string, targetImageId: string) => {
+    if (!editingProduct || !selectedStoreId) return;
+    const currentList = productImagesByProductId[editingProduct.id] || [];
+    if (draggedImageId === targetImageId) return;
+    const fromIndex = currentList.findIndex((img) => img.id === draggedImageId);
+    const toIndex = currentList.findIndex((img) => img.id === targetImageId);
+    if (fromIndex < 0 || toIndex < 0) return;
+
+    const reordered = [...currentList];
+    const [moved] = reordered.splice(fromIndex, 1);
+    reordered.splice(toIndex, 0, moved);
+
+    setMediaReordering(true);
+    setMediaMsg("Updating image order...");
+    const updates = reordered.map((img, sortOrder) =>
+      supabase
+        .from("product_images")
+        .update({ sort_order: sortOrder })
+        .eq("id", img.id)
+        .eq("store_id", selectedStoreId),
+    );
+    const results = await Promise.all(updates);
+    const failed = results.find((result) => result.error);
+    if (failed?.error) {
+      setMediaReordering(false);
+      setMediaMsg(failed.error.message);
+      setDraggingImageId(null);
+      setDragOverImageId(null);
+      return;
+    }
+    await refreshProductImages();
+    setMediaReordering(false);
+    setDraggingImageId(null);
+    setDragOverImageId(null);
+    setMediaMsg("Image order updated.");
   };
 
   return (
@@ -1154,21 +1528,49 @@ export default function ProductsPage() {
       </header>
 
       <article className="rounded-3xl border border-slate-300 bg-gradient-to-b from-white to-slate-50/60 p-6 shadow-sm">
-          <div className="flex items-end justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-semibold text-slate-900">Products</h2>
-              <p className="mt-1 text-sm text-slate-500">List of products for the selected store.</p>
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">Products</h2>
+            <p className="mt-1 text-sm text-slate-500">Visual catalog view. Open details to edit full product info.</p>
+            <div className="mt-3 inline-flex rounded-full border border-slate-200 bg-white p-1 shadow-sm">
+              <button
+                type="button"
+                className={`rounded-full px-3 py-1 text-xs font-semibold transition ${viewMode === "card" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"}`}
+                onClick={() => {
+                  setViewMode("card");
+                  setSelectedProductIds([]);
+                }}
+              >
+                Card view
+              </button>
+              <button
+                type="button"
+                className={`rounded-full px-3 py-1 text-xs font-semibold transition ${viewMode === "table" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"}`}
+                onClick={() => setViewMode("table")}
+              >
+                Table view
+              </button>
             </div>
-            <div className="flex items-center gap-3">
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            {viewMode === "table" && (
               <div className="flex items-center gap-2">
                 <span className="text-xs font-medium text-slate-500">{selectedProductIds.length} selected</span>
+                <button
+                  type="button"
+                  className="rounded-full border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                  onClick={() => toggleSelectAllFiltered(!isAllFilteredSelected)}
+                  disabled={filteredProducts.length === 0}
+                >
+                  {isAllFilteredSelected ? "Clear all" : `Select all (${filteredProducts.length})`}
+                </button>
                 <button
                   type="button"
                   className="rounded-full border border-blue-200 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50 disabled:opacity-50"
                   onClick={() => handleBulkSetActive(true)}
                   disabled={selectedProductIds.length === 0 || bulkWorking}
                 >
-                  Activar
+                  Activate
                 </button>
                 <button
                   type="button"
@@ -1186,11 +1588,44 @@ export default function ProductsPage() {
                 >
                   Delete
                 </button>
+                <button
+                  type="button"
+                  className="rounded-full border border-indigo-200 px-3 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
+                  onClick={() => setIsAdvancedModalOpen(true)}
+                  disabled={selectedProductIds.length === 0 || bulkWorking}
+                >
+                  Advanced
+                </button>
               </div>
-              <div>
+            )}
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Sort</label>
+              <select
+                className="rounded-xl border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700"
+                value={sort?.key || "title"}
+                onChange={(e) =>
+                  setSort((prev) => ({
+                    key: e.target.value as ProductSortKey,
+                    direction: prev?.direction || "asc",
+                  }))
+                }
+              >
+                <option value="title">Title</option>
+                <option value="sku">SKU</option>
+                <option value="type">Type</option>
+                <option value="subtype">{getSubtypeLabel(productTypeFilter)}</option>
+                <option value="tagline">Tagline</option>
+              </select>
+              <button
+                type="button"
+                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700"
+                onClick={() => sort && setSort({ key: sort.key, direction: sort.direction === "asc" ? "desc" : "asc" })}
+              >
+                {sort?.direction === "asc" ? "Asc" : "Desc"}
+              </button>
               <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Per page</label>
               <select
-                className="ml-2 rounded-xl border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700"
+                className="rounded-xl border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700"
                 value={pageSize}
                 onChange={(e) => setPageSize(Number(e.target.value))}
               >
@@ -1198,298 +1633,405 @@ export default function ProductsPage() {
                 <option value={25}>25</option>
                 <option value={50}>50</option>
               </select>
-              </div>
             </div>
           </div>
+        </div>
 
-          {loadingProducts ? (
-            <p className="mt-6 text-sm text-slate-500">Loading products...</p>
-          ) : paginatedProducts.length === 0 ? (
-            <p className="mt-6 rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-500">
-              No products for this filter.
-            </p>
-          ) : (
-            <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-200 bg-white">
-              <table className="min-w-full divide-y divide-slate-200 text-sm">
-                <thead>
-                  <tr className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
-                    <th className="px-2 py-3">
-                      <input
-                        type="checkbox"
-                        checked={isAllCurrentPageSelected}
-                        onChange={(e) => toggleSelectCurrentPage(e.target.checked)}
-                        aria-label="Select page"
-                      />
-                    </th>
-                    <th className="px-2 py-3">
-                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("sku")}>
-                        SKU <span>{getSortArrow("sku")}</span>
-                      </button>
-                    </th>
-                    <th className="px-2 py-3">
-                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("title")}>
-                        Title <span>{getSortArrow("title")}</span>
-                      </button>
-                    </th>
-                    <th className="px-2 py-3">
-                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("type")}>
-                        Tipo <span>{getSortArrow("type")}</span>
-                      </button>
-                    </th>
-                    <th className="px-2 py-3">
-                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("subtype")}>
-                        {getSubtypeLabel(productTypeFilter)} <span>{getSortArrow("subtype")}</span>
-                      </button>
-                    </th>
-	                    <th className="px-2 py-3">
-	                      <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort("tagline")}>
-	                        Tagline <span>{getSortArrow("tagline")}</span>
-	                      </button>
-	                    </th>
-	                    <th className="px-2 py-3">Base</th>
-	                    <th className="px-2 py-3">Woo</th>
-	                    <th className="px-2 py-3">Etsy</th>
-	                    <th className="px-2 py-3">Media</th>
-	                    <th className="px-2 py-3">Actions</th>
-	                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-	                  {paginatedProducts.map((product) => {
-	                    const isEditing = editingId === product.id;
-                      const mediaList = productImagesByProductId[product.id] || [];
-                      const primaryImage = mediaList.find((image) => image.is_primary) || mediaList[0];
+        {loadingProducts ? (
+          <p className="mt-6 text-sm text-slate-500">Loading products...</p>
+        ) : paginatedProducts.length === 0 ? (
+          <p className="mt-6 rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-500">
+            No products for this filter.
+          </p>
+        ) : viewMode === "card" ? (
+          <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            {paginatedProducts.map((product) => {
+              const mediaList = productImagesByProductId[product.id] || [];
+              const primaryImage = mediaList.find((image) => image.is_primary) || mediaList[0];
+              return (
+                <article key={product.id} className="relative overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                  <div className="relative h-56 w-full bg-slate-100">
+                    {primaryImage ? (
+                      <>
+                        <img
+                          src={getPublicImageUrl(primaryImage.storage_path)}
+                          alt={product.title}
+                          className="h-full w-full object-cover"
+                        />
+                        <button
+                          type="button"
+                          className="absolute right-3 top-3 rounded-full border border-slate-200 bg-white/95 px-2.5 py-1 text-[11px] font-semibold text-slate-700 shadow-sm hover:border-slate-400"
+                          onClick={() => openImagePreview(mediaList, product.title, primaryImage.storage_path)}
+                        >
+                          View
+                        </button>
+                      </>
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center text-sm text-slate-500">
+                        No image
+                      </div>
+                    )}
+                  </div>
 
-                    return (
-                      <tr key={product.id} className="text-slate-700 transition-colors hover:bg-slate-50">
-                        <td className="px-2 py-3">
-                          <input
-                            type="checkbox"
-                            checked={selectedProductIds.includes(product.id)}
-                            onChange={(e) => toggleProductSelection(product.id, e.target.checked)}
-                            aria-label={`Select ${product.sku}`}
-                          />
-                        </td>
-                        <td className="px-2 py-3 font-medium">
-                          {isEditing ? (
-                            <input
-                              className="w-32 rounded-lg border border-slate-200 px-2 py-1"
-                              value={editSku}
-                              onChange={(e) => setEditSku(e.target.value)}
-                            />
-                          ) : (
-                            product.sku
-                          )}
-                        </td>
-	                        <td className="px-2 py-3">
-	                          {isEditing ? (
-	                            <input
-                              className="w-56 rounded-lg border border-slate-200 px-2 py-1"
-                              value={editTitle}
-                              onChange={(e) => setEditTitle(e.target.value)}
-                            />
-                          ) : (
-                            product.title
-                          )}
-                        </td>
-                        <td className="px-2 py-3">
-                          {isEditing ? (
-                            <select
-                              className="w-36 rounded-lg border border-slate-200 px-2 py-1"
-                              value={editProductType}
-                              onChange={(e) => setEditProductType(e.target.value as ProductType)}
+                  <div className="space-y-3 p-4">
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-slate-500">{product.sku}</p>
+                      <h3 className="mt-1 line-clamp-2 text-lg font-semibold text-slate-900">{product.title}</h3>
+                    </div>
+                    <div className="flex items-end justify-between">
+                      <div>
+                        <p className="text-xs uppercase tracking-wide text-slate-500">Base price</p>
+                        <p className="text-2xl font-semibold text-slate-900">{product.base_price.toFixed(2)}</p>
+                      </div>
+                      <div className="text-right text-xs text-slate-500">
+                        <p>{getTypeLabel(product.product_type)}</p>
+                        <p>{mediaList.length} image(s)</p>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-slate-400"
+                        onClick={() => startEdit(product)}
+                      >
+                        Details
+                      </button>
+                      {product.is_active && (
+                        <button
+                          type="button"
+                          className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
+                          onClick={() => handleSoftDelete(product)}
+                        >
+                          Deactivate
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="mt-5 overflow-x-auto rounded-2xl border border-slate-200 bg-white">
+            <table className="min-w-full text-sm">
+              <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-3 py-3 text-left">
+                    <input
+                      type="checkbox"
+                      checked={isAllCurrentPageSelected}
+                      onChange={(e) => toggleSelectCurrentPage(e.target.checked)}
+                      aria-label="Select all on page"
+                    />
+                  </th>
+                  <th className="px-3 py-3 text-left">Photo</th>
+                  <th className="px-3 py-3 text-left">Title</th>
+                  <th className="px-3 py-3 text-left">SKU</th>
+                  <th className="px-3 py-3 text-left">Type</th>
+                  <th className="px-3 py-3 text-left">Base price</th>
+                  <th className="px-3 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {paginatedProducts.map((product) => {
+                  const mediaList = productImagesByProductId[product.id] || [];
+                  const primaryImage = mediaList.find((image) => image.is_primary) || mediaList[0];
+                  return (
+                    <tr key={product.id} className="align-middle">
+                      <td className="px-3 py-3">
+                        <input
+                          type="checkbox"
+                          checked={selectedProductIds.includes(product.id)}
+                          onChange={(e) => toggleProductSelection(product.id, e.target.checked)}
+                          aria-label={`Select ${product.sku}`}
+                        />
+                      </td>
+                      <td className="px-3 py-3">
+                        {primaryImage ? (
+                          <div className="relative h-16 w-16 overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
+                            <img src={getPublicImageUrl(primaryImage.storage_path)} alt={product.title} className="h-full w-full object-cover" />
+                            <button
+                              type="button"
+                              className="absolute right-1 top-1 rounded-full border border-slate-200 bg-white/95 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 shadow-sm"
+                              onClick={() => openImagePreview(mediaList, product.title, primaryImage.storage_path)}
                             >
-                              {PRODUCT_TYPES.map((type) => (
-                                <option key={type} value={type}>
-                                  {getTypeLabel(type)}
-                                </option>
-                              ))}
-                            </select>
-                          ) : (
-                            getTypeLabel(product.product_type)
-                          )}
-                        </td>
-                        <td className="px-2 py-3">
-                          {isEditing ? (
-                            editProductType === "maquetas" ? (
-                              <input
-                                className="w-36 rounded-lg border border-slate-200 px-2 py-1"
-                                value={editEscala}
-                                onChange={(e) => setEditEscala(e.target.value)}
-                              />
-                            ) : editProductType === "ropa" ? (
-                              <input
-                                className="w-36 rounded-lg border border-slate-200 px-2 py-1"
-                                value={editClothingType}
-                                onChange={(e) => setEditClothingType(e.target.value)}
-                              />
-                            ) : (
-                              <input
-                                className="w-36 rounded-lg border border-slate-200 px-2 py-1"
-                                value={editAccessoryType}
-                                onChange={(e) => setEditAccessoryType(e.target.value)}
-                              />
-                            )
-                          ) : (
-                            getProductSubtype(product, productTypeFilter)
-                          )}
-                        </td>
-	                        <td className="px-2 py-3">
-	                          {isEditing ? (
-	                            <input
-	                              className="w-56 rounded-lg border border-slate-200 px-2 py-1"
-	                              value={editPhrase}
-	                              onChange={(e) => setEditPhrase(e.target.value)}
-	                            />
-	                          ) : (
-	                            product.catchy_phrase || "-"
-	                          )}
-	                        </td>
-                          <td className="px-2 py-3">
-                            {isEditing ? (
-                              <input
-                                className="w-24 rounded-lg border border-slate-200 px-2 py-1"
-                                value={editBasePrice}
-                                onChange={(e) => setEditBasePrice(e.target.value)}
-                                inputMode="decimal"
-                              />
-                            ) : (
-                              product.base_price.toFixed(2)
-                            )}
-                          </td>
-                          <td className="px-2 py-3">
-                            {isEditing ? (
-                              <input
-                                className="w-24 rounded-lg border border-slate-200 px-2 py-1"
-                                value={editWooPrice}
-                                onChange={(e) => setEditWooPrice(e.target.value)}
-                                inputMode="decimal"
-                                placeholder="-"
-                              />
-                            ) : product.woo_price == null ? (
-                              "-"
-                            ) : (
-                              product.woo_price.toFixed(2)
-                            )}
-                          </td>
-                          <td className="px-2 py-3">
-                            {isEditing ? (
-                              <input
-                                className="w-24 rounded-lg border border-slate-200 px-2 py-1"
-                                value={editEtsyPrice}
-                                onChange={(e) => setEditEtsyPrice(e.target.value)}
-                                inputMode="decimal"
-                                placeholder="-"
-                              />
-                            ) : product.etsy_price == null ? (
-                              "-"
-                            ) : (
-                              product.etsy_price.toFixed(2)
-                            )}
-                          </td>
-                          <td className="px-2 py-3">
-                            <div className="flex items-center gap-2">
-                              {primaryImage ? (
-                                <img
-                                  src={getPublicImageUrl(primaryImage.storage_path)}
-                                  alt={product.title}
-                                  className="h-10 w-10 rounded-lg border border-slate-200 object-cover"
-                                />
-                              ) : (
-                                <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-[10px] text-slate-500">
-                                  No img
-                                </div>
-                              )}
-                              <span className="text-xs text-slate-600">{mediaList.length}</span>
-                            </div>
-                          </td>
-	                        <td className="px-2 py-3">
-	                          <div className="flex flex-wrap gap-2">
-                            {isEditing ? (
-                              <>
-                                <button
-                                  type="button"
-                                  className="rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
-                                  onClick={handleSaveEdit}
-                                  disabled={savingEdit}
-                                >
-                                  {savingEdit ? "Saving" : "Save"}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700"
-                                  onClick={cancelEdit}
-                                >
-                                  Cancel
-                                </button>
-                              </>
-                            ) : (
-                              <>
-	                                <button
-	                                  type="button"
-	                                  className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-indigo-200 hover:text-indigo-700"
-	                                  onClick={() => startEdit(product)}
-	                                >
-	                                  Edit
-	                                </button>
-                                  <button
-                                    type="button"
-                                    className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-slate-400"
-                                    onClick={() => openMediaManager(product)}
-                                  >
-                                    Media
-                                  </button>
-	                                {product.is_active && (
-                                  <button
-                                    type="button"
-                                    className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
-                                    onClick={() => handleSoftDelete(product)}
-                                  >
-                                    Deactivate
-                                  </button>
-                                )}
-                              </>
-                            )}
+                              View
+                            </button>
                           </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          <div className="mt-4 flex items-center justify-between text-sm text-slate-600">
-            <p>
-              Page {page} of {totalPages}
-            </p>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                className="rounded-full border border-slate-200 px-3 py-1 font-semibold disabled:opacity-50"
-                onClick={() => setPage((prev) => Math.max(1, prev - 1))}
-                disabled={page <= 1}
-              >
-                Prev
-              </button>
-              <button
-                type="button"
-                className="rounded-full border border-slate-200 px-3 py-1 font-semibold disabled:opacity-50"
-                onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
-                disabled={page >= totalPages}
-              >
-                Next
-              </button>
-            </div>
+                        ) : (
+                          <div className="h-16 w-16 rounded-lg border border-dashed border-slate-300 bg-slate-50" />
+                        )}
+                      </td>
+                      <td className="px-3 py-3 font-medium text-slate-900">{product.title}</td>
+                      <td className="px-3 py-3 text-slate-600">{product.sku}</td>
+                      <td className="px-3 py-3 text-slate-600">{getTypeLabel(product.product_type)}</td>
+                      <td className="px-3 py-3 text-slate-900">{product.base_price.toFixed(2)}</td>
+                      <td className="px-3 py-3 text-right">
+                        <div className="inline-flex items-center gap-2">
+                          <button
+                            type="button"
+                            className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-slate-400"
+                            onClick={() => startEdit(product)}
+                          >
+                            Details
+                          </button>
+                          {product.is_active && (
+                            <button
+                              type="button"
+                              className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
+                              onClick={() => handleSoftDelete(product)}
+                            >
+                              Deactivate
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
+        )}
+
+        <div className="mt-4 flex items-center justify-between text-sm text-slate-600">
+          <p>
+            Page {page} of {totalPages}
+          </p>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className="rounded-full border border-slate-200 px-3 py-1 font-semibold disabled:opacity-50"
+              onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+              disabled={page <= 1}
+            >
+              Prev
+            </button>
+            <button
+              type="button"
+              className="rounded-full border border-slate-200 px-3 py-1 font-semibold disabled:opacity-50"
+              onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
+              disabled={page >= totalPages}
+            >
+              Next
+            </button>
+          </div>
+        </div>
       </article>
 
       {msg && <p className="text-sm text-slate-600">{msg}</p>}
 
+      {successModal && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/45 p-4" onClick={() => setSuccessModal(null)}>
+          <article
+            className="w-full max-w-md rounded-3xl border border-emerald-200 bg-white p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
+              Success
+            </div>
+            <h3 className="mt-3 text-lg font-semibold text-slate-900">{successModal.title}</h3>
+            <p className="mt-2 text-sm text-slate-600">{successModal.message}</p>
+            <div className="mt-5 flex justify-end">
+              <button
+                type="button"
+                className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
+                onClick={() => setSuccessModal(null)}
+              >
+                Great
+              </button>
+            </div>
+          </article>
+        </div>
+      )}
+
+      {progressModal && (
+        <div className="fixed inset-0 z-[69] flex items-center justify-center bg-slate-900/40 p-4">
+          <article className="w-full max-w-md rounded-3xl border border-indigo-200 bg-white p-6 shadow-2xl">
+            <h3 className="text-lg font-semibold text-slate-900">{progressModal.title}</h3>
+            <p className="mt-2 text-sm text-slate-600">{progressModal.detail}</p>
+            <div className="mt-4 h-2 w-full overflow-hidden rounded-full bg-slate-200">
+              <div
+                className="h-full rounded-full bg-indigo-500 transition-all duration-300"
+                style={{ width: `${Math.max(5, progressModal.percent)}%` }}
+              />
+            </div>
+            <p className="mt-2 text-xs text-slate-500">
+              {progressModal.percent}% complete. Please wait, this can take a bit for large selections.
+            </p>
+          </article>
+        </div>
+      )}
+
+      {isImageImportPromptOpen && (
+        <div className="fixed inset-0 z-[71] flex items-center justify-center bg-slate-900/45 p-4" onClick={() => setIsImageImportPromptOpen(false)}>
+          <article
+            className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-semibold text-slate-900">Image Import Fallback</h3>
+            <p className="mt-2 text-sm text-slate-600">
+              If an image is not found in <span className="font-semibold">{bulkImportPlatform}</span>, should we try{" "}
+              <span className="font-semibold">{fallbackPlatform}</span>?
+            </p>
+            <label className="mt-4 flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={useImageFallback}
+                onChange={(e) => setUseImageFallback(e.target.checked)}
+              />
+              Yes, use fallback marketplace when source has no image.
+            </label>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-full border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
+                onClick={() => setIsImageImportPromptOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
+                onClick={() => {
+                  setIsImageImportPromptOpen(false);
+                  void runBulkImportMarketplaceImages(useImageFallback);
+                }}
+              >
+                Start import
+              </button>
+            </div>
+          </article>
+        </div>
+      )}
+
+      {isAdvancedModalOpen && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/40 p-4" onClick={() => setIsAdvancedModalOpen(false)}>
+          <article
+            className="mx-auto my-6 w-full max-w-2xl max-h-[88vh] overflow-y-auto rounded-3xl border border-slate-200 bg-white p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900">Advanced Bulk Actions</h2>
+                <p className="mt-1 text-sm text-slate-500">{selectedProductIds.length} product(s) selected.</p>
+              </div>
+              <button
+                type="button"
+                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700"
+                onClick={() => setIsAdvancedModalOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+
+            <section className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <h3 className="text-sm font-semibold text-slate-900">Bulk prices</h3>
+              <p className="mt-1 text-xs text-slate-500">Only filled values are applied. Empty fields are left unchanged.</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-3">
+                <input
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+                  placeholder="Base price"
+                  inputMode="decimal"
+                  value={bulkBasePrice}
+                  onChange={(e) => setBulkBasePrice(e.target.value)}
+                />
+                <input
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+                  placeholder="Woo price"
+                  inputMode="decimal"
+                  value={bulkWooPrice}
+                  onChange={(e) => setBulkWooPrice(e.target.value)}
+                />
+                <input
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+                  placeholder="Etsy price"
+                  inputMode="decimal"
+                  value={bulkEtsyPrice}
+                  onChange={(e) => setBulkEtsyPrice(e.target.value)}
+                />
+              </div>
+              <button
+                type="button"
+                className="mt-3 rounded-full border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                onClick={handleBulkUpdatePrices}
+                disabled={anyAdvancedWorking || selectedProductIds.length === 0}
+              >
+                {applyingBulkPrices ? "Applying..." : "Apply prices"}
+              </button>
+            </section>
+
+            <section className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <h3 className="text-sm font-semibold text-slate-900">Import prices from marketplace</h3>
+              <p className="mt-1 text-xs text-slate-500">
+                Pulls price by SKU and updates Woo/Etsy price fields for selected products.
+              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Source</label>
+                <select
+                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+                  value={bulkPriceImportPlatform}
+                  onChange={(e) => setBulkPriceImportPlatform(e.target.value as BulkPriceImportPlatform)}
+                >
+                  <option value="both">Etsy + WooCommerce</option>
+                  <option value="etsy">Etsy</option>
+                  <option value="woocommerce">WooCommerce</option>
+                </select>
+                <label className="ml-2 flex items-center gap-2 text-xs text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={bulkPriceImportToBase}
+                    onChange={(e) => setBulkPriceImportToBase(e.target.checked)}
+                  />
+                  Also overwrite base price
+                </label>
+                <button
+                  type="button"
+                  className="rounded-full border border-emerald-200 px-4 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+                  onClick={handleBulkImportMarketplacePrices}
+                  disabled={anyAdvancedWorking || selectedProductIds.length === 0}
+                >
+                  {importingMarketplacePrices ? "Importing..." : "Import prices"}
+                </button>
+              </div>
+            </section>
+
+            <section className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <h3 className="text-sm font-semibold text-slate-900">Import images from marketplace</h3>
+              <p className="mt-1 text-xs text-slate-500">
+                Pulls product images by SKU mapping from the selected platform and attaches them to selected products.
+              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Source</label>
+                <select
+                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+                  value={bulkImportPlatform}
+                  onChange={(e) => setBulkImportPlatform(e.target.value as BulkImportPlatform)}
+                >
+                  <option value="etsy">Etsy</option>
+                  <option value="woocommerce">WooCommerce</option>
+                </select>
+                <button
+                  type="button"
+                  className="rounded-full border border-indigo-200 px-4 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
+                  onClick={handleBulkImportMarketplaceImages}
+                  disabled={anyAdvancedWorking || selectedProductIds.length === 0}
+                >
+                  {importingMarketplaceImages ? "Importing..." : "Import images"}
+                </button>
+              </div>
+            </section>
+          </article>
+        </div>
+      )}
+
       {isCreateModalOpen && (
         <div
           className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/40 p-4"
-          onClick={() => setIsCreateModalOpen(false)}
+          onClick={() => {
+            setIsCreateModalOpen(false);
+            setCreateMediaFiles([]);
+          }}
         >
           <article
             className="mx-auto my-6 w-full max-w-xl max-h-[88vh] overflow-y-auto rounded-3xl border border-slate-200 bg-white p-6 shadow-xl"
@@ -1503,7 +2045,10 @@ export default function ProductsPage() {
               <button
                 type="button"
                 className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700"
-                onClick={() => setIsCreateModalOpen(false)}
+                onClick={() => {
+                  setIsCreateModalOpen(false);
+                  setCreateMediaFiles([]);
+                }}
               >
                 Close
               </button>
@@ -1624,6 +2169,23 @@ export default function ProductsPage() {
                 </div>
               </div>
 
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Media (optional)</label>
+                <input
+                  className="mt-2 block w-full text-sm text-slate-700 file:mr-3 file:rounded-full file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-slate-800"
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  onChange={(e) => setCreateMediaFiles(Array.from(e.target.files || []))}
+                  disabled={saving}
+                />
+                <p className="mt-2 text-xs text-slate-500">
+                  {createMediaFiles.length > 0
+                    ? `${createMediaFiles.length} image(s) selected. They will upload after product creation.`
+                    : "You can add product images now and keep editing details later."}
+                </p>
+              </div>
+
               <label className="flex items-center gap-2 text-sm text-slate-700">
                 <input checked={isActive} onChange={(e) => setIsActive(e.target.checked)} type="checkbox" />
                 Active
@@ -1641,80 +2203,278 @@ export default function ProductsPage() {
         </div>
       )}
 
-      {mediaProduct && (
-        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/40 p-4" onClick={closeMediaManager}>
+      {editingProduct && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/40 p-4" onClick={cancelEdit}>
           <article
-            className="mx-auto my-6 w-full max-w-4xl max-h-[88vh] overflow-y-auto rounded-3xl border border-slate-200 bg-white p-6 shadow-xl"
+            className="mx-auto my-6 w-full max-w-2xl max-h-[88vh] overflow-y-auto rounded-3xl border border-slate-200 bg-white p-6 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start justify-between gap-3">
               <div>
-                <h2 className="text-lg font-semibold text-slate-900">Product Media</h2>
+                <h2 className="text-lg font-semibold text-slate-900">Product Details</h2>
                 <p className="mt-1 text-sm text-slate-500">
-                  {mediaProduct.sku} - {mediaProduct.title}
+                  {editingProduct.sku} - {editingProduct.title}
                 </p>
               </div>
               <button
                 type="button"
                 className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700"
-                onClick={closeMediaManager}
+                onClick={cancelEdit}
               >
                 Close
               </button>
             </div>
 
-            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Upload images</label>
+            <div className="mt-5 grid gap-4 md:grid-cols-2">
+              <div>
+                <label className="text-sm font-medium text-slate-700">SKU</label>
+                <input
+                  className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                  value={editSku}
+                  onChange={(e) => setEditSku(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700">Title</label>
+                <input
+                  className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700">Type</label>
+                <select
+                  className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                  value={editProductType}
+                  onChange={(e) => setEditProductType(e.target.value as ProductType)}
+                >
+                  {PRODUCT_TYPES.map((type) => (
+                    <option key={type} value={type}>
+                      {getTypeLabel(type)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700">{getSubtypeLabel(editProductType)}</label>
+                {editProductType === "maquetas" ? (
+                  <input
+                    className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                    value={editEscala}
+                    onChange={(e) => setEditEscala(e.target.value)}
+                  />
+                ) : editProductType === "ropa" ? (
+                  <input
+                    className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                    value={editClothingType}
+                    onChange={(e) => setEditClothingType(e.target.value)}
+                  />
+                ) : (
+                  <input
+                    className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                    value={editAccessoryType}
+                    onChange={(e) => setEditAccessoryType(e.target.value)}
+                  />
+                )}
+              </div>
+              <div className="md:col-span-2">
+                <label className="text-sm font-medium text-slate-700">Tagline</label>
+                <input
+                  className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                  value={editPhrase}
+                  onChange={(e) => setEditPhrase(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700">Base price</label>
+                <input
+                  className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                  value={editBasePrice}
+                  onChange={(e) => setEditBasePrice(e.target.value)}
+                  inputMode="decimal"
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700">Woo price (optional)</label>
+                <input
+                  className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                  value={editWooPrice}
+                  onChange={(e) => setEditWooPrice(e.target.value)}
+                  inputMode="decimal"
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700">Etsy price (optional)</label>
+                <input
+                  className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                  value={editEtsyPrice}
+                  onChange={(e) => setEditEtsyPrice(e.target.value)}
+                  inputMode="decimal"
+                />
+              </div>
+              <div className="flex items-center">
+                <label className="flex items-center gap-2 text-sm text-slate-700">
+                  <input type="checkbox" checked={editActive} onChange={(e) => setEditActive(e.target.checked)} />
+                  Active
+                </label>
+              </div>
+            </div>
+
+            <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold text-slate-900">Media</h3>
+                <p className="text-xs text-slate-500">{currentMediaList.length} image(s)</p>
+              </div>
               <input
-                className="mt-2 block w-full text-sm text-slate-700 file:mr-3 file:rounded-full file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-slate-800"
+                className="mt-3 block w-full text-sm text-slate-700 file:mr-3 file:rounded-full file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-slate-800"
                 type="file"
                 accept="image/*"
                 multiple
                 onChange={handleUploadMedia}
-                disabled={mediaUploading}
+                disabled={mediaUploading || mediaReordering}
               />
               {mediaUploading && <p className="mt-2 text-xs text-slate-500">Uploading images...</p>}
+              {mediaReordering && <p className="mt-2 text-xs text-slate-500">Reordering images...</p>}
               {mediaLoading && <p className="mt-2 text-xs text-slate-500">Loading existing images...</p>}
               {mediaMsg && <p className="mt-2 text-xs text-slate-600">{mediaMsg}</p>}
-            </div>
+              {currentMediaList.length > 1 && <p className="mt-2 text-xs text-slate-500">Drag and drop images to reorder them.</p>}
 
-            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {currentMediaList.length === 0 ? (
-                <p className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-500">
-                  No images uploaded yet.
-                </p>
-              ) : (
-                currentMediaList.map((image) => (
-                  <article key={image.id} className="rounded-2xl border border-slate-200 bg-white p-3">
-                    <img
-                      src={getPublicImageUrl(image.storage_path)}
-                      alt={`${mediaProduct.title} media`}
-                      className="h-40 w-full rounded-xl border border-slate-200 object-cover"
-                    />
-                    <div className="mt-3 flex items-center justify-between gap-2">
-                      <span className="text-xs text-slate-500">{image.is_primary ? "Cover image" : "Image"}</span>
-                      <div className="flex gap-2">
-                        {!image.is_primary && (
-                          <button
-                            type="button"
-                            className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-slate-400"
-                            onClick={() => handleSetPrimaryImage(image)}
-                          >
-                            Set cover
-                          </button>
-                        )}
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                {currentMediaList.length === 0 ? (
+                  <p className="rounded-xl border border-dashed border-slate-300 bg-white px-4 py-6 text-sm text-slate-500">
+                    No images uploaded yet.
+                  </p>
+                ) : (
+                  currentMediaList.map((image) => (
+                    <article
+                      key={image.id}
+                      className={`rounded-2xl border bg-white p-3 transition ${
+                        dragOverImageId === image.id ? "border-indigo-400 ring-2 ring-indigo-100" : "border-slate-200"
+                      }`}
+                      draggable={!mediaReordering}
+                      onDragStart={() => setDraggingImageId(image.id)}
+                      onDragEnd={() => {
+                        setDraggingImageId(null);
+                        setDragOverImageId(null);
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        if (draggingImageId && draggingImageId !== image.id) setDragOverImageId(image.id);
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        if (!draggingImageId || draggingImageId === image.id) return;
+                        void handleReorderImages(draggingImageId, image.id);
+                      }}
+                    >
+                      <div className="relative">
+                        <img
+                          src={getPublicImageUrl(image.storage_path)}
+                          alt={`${editingProduct.title} media`}
+                          className="h-40 w-full rounded-xl border border-slate-200 object-cover"
+                        />
                         <button
                           type="button"
-                          className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
-                          onClick={() => handleDeleteImage(image)}
+                          className="absolute right-2 top-2 rounded-full border border-slate-200 bg-white/95 px-2.5 py-1 text-[11px] font-semibold text-slate-700 shadow-sm hover:border-slate-400"
+                          onClick={() => openImagePreview(currentMediaList, editingProduct.title, image.storage_path)}
                         >
-                          Delete
+                          View
                         </button>
                       </div>
-                    </div>
-                  </article>
-                ))
-              )}
+                      <div className="mt-3 flex items-center justify-between gap-2">
+                        <span className="text-xs text-slate-500">
+                          {image.is_primary ? "Cover image" : "Image"} {draggingImageId === image.id ? "(moving...)" : ""}
+                        </span>
+                        <div className="flex gap-2">
+                          {!image.is_primary && (
+                            <button
+                              type="button"
+                              className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-slate-400"
+                              onClick={() => handleSetPrimaryImage(image)}
+                            >
+                              Set cover
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
+                            onClick={() => handleDeleteImage(image)}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    </article>
+                  ))
+                )}
+              </div>
+            </div>
+
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-full border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
+                onClick={cancelEdit}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                onClick={handleSaveEdit}
+                disabled={savingEdit}
+              >
+                {savingEdit ? "Saving..." : "Save changes"}
+              </button>
+            </div>
+          </article>
+        </div>
+      )}
+
+      {previewGallery && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/80 p-4" onClick={() => setPreviewGallery(null)}>
+          <article className="relative w-full max-w-5xl rounded-2xl border border-slate-700 bg-slate-950 p-3 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              className="absolute right-3 top-3 rounded-full border border-slate-500 bg-slate-900/80 px-3 py-1 text-xs font-semibold text-slate-100 hover:border-slate-300"
+              onClick={() => setPreviewGallery(null)}
+            >
+              Close
+            </button>
+            <div className="absolute left-3 top-3 rounded-full border border-slate-600 bg-slate-900/80 px-3 py-1 text-xs font-semibold text-slate-100">
+              {previewGallery.index + 1} / {previewGallery.urls.length}
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                className="rounded-full border border-slate-500 bg-slate-900/80 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-slate-300 disabled:opacity-40"
+                disabled={previewGallery.index === 0}
+                onClick={() =>
+                  setPreviewGallery((prev) =>
+                    prev ? { ...prev, index: Math.max(0, prev.index - 1) } : prev,
+                  )
+                }
+              >
+                Prev
+              </button>
+              <img
+                src={previewGallery.urls[previewGallery.index]}
+                alt={previewGallery.title}
+                className="max-h-[82vh] w-full rounded-xl object-contain"
+              />
+              <button
+                type="button"
+                className="rounded-full border border-slate-500 bg-slate-900/80 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-slate-300 disabled:opacity-40"
+                disabled={previewGallery.index >= previewGallery.urls.length - 1}
+                onClick={() =>
+                  setPreviewGallery((prev) =>
+                    prev ? { ...prev, index: Math.min(prev.urls.length - 1, prev.index + 1) } : prev,
+                  )
+                }
+              >
+                Next
+              </button>
             </div>
           </article>
         </div>
