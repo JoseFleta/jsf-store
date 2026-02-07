@@ -3,13 +3,20 @@ import { createClient } from "@supabase/supabase-js";
 
 type ConfigPayload = {
   storeId?: string;
+  enabledMarketplaces?: string[];
   wooUrl?: string;
   wooKey?: string;
   wooSecret?: string;
   etsyBearer?: string;
+  etsyRefreshToken?: string;
+  etsyTokenExpiresAt?: string;
   etsyKeystring?: string;
   etsyShopName?: string;
   etsySkumapJson?: string;
+  amazonSellerId?: string;
+  amazonAccessKey?: string;
+  amazonSecretKey?: string;
+  amazonRegion?: string;
 };
 
 function normalizeOptional(value: unknown): string | null {
@@ -53,7 +60,7 @@ export async function GET(req: Request) {
 
   const { data, error } = await auth.supabaseAdmin
     .from("store_integrations")
-    .select("woo_url,woo_key,woo_secret,etsy_bearer,etsy_keystring,etsy_shop_name,etsy_skumap_json,updated_at")
+    .select("enabled_marketplaces,woo_url,woo_key,woo_secret,etsy_bearer,etsy_refresh_token,etsy_token_expires_at,etsy_keystring,etsy_shop_name,etsy_skumap_json,amazon_seller_id,amazon_access_key,amazon_secret_key,amazon_region,updated_at")
     .eq("store_id", storeId)
     .maybeSingle();
 
@@ -71,22 +78,36 @@ export async function GET(req: Request) {
   const config = data
     ? {
         wooUrl: data.woo_url || "",
+        enabledMarketplaces: Array.isArray(data.enabled_marketplaces) ? data.enabled_marketplaces : [],
         wooKey: data.woo_key || "",
         wooSecret: data.woo_secret || "",
         etsyBearer: data.etsy_bearer || "",
+        etsyRefreshToken: data.etsy_refresh_token || "",
+        etsyTokenExpiresAt: data.etsy_token_expires_at || "",
         etsyKeystring: data.etsy_keystring || "",
         etsyShopName: data.etsy_shop_name || "",
         etsySkumapJson: data.etsy_skumap_json ? JSON.stringify(data.etsy_skumap_json, null, 2) : "{}",
+        amazonSellerId: data.amazon_seller_id || "",
+        amazonAccessKey: data.amazon_access_key || "",
+        amazonSecretKey: data.amazon_secret_key || "",
+        amazonRegion: data.amazon_region || "",
         updatedAt: data.updated_at || null,
       }
     : {
+        enabledMarketplaces: [],
         wooUrl: "",
         wooKey: "",
         wooSecret: "",
         etsyBearer: "",
+        etsyRefreshToken: "",
+        etsyTokenExpiresAt: "",
         etsyKeystring: "",
         etsyShopName: "",
         etsySkumapJson: "{}",
+        amazonSellerId: "",
+        amazonAccessKey: "",
+        amazonSecretKey: "",
+        amazonRegion: "",
         updatedAt: null,
       };
 
@@ -119,13 +140,20 @@ export async function POST(req: Request) {
 
   const payload = {
     store_id: storeId,
+    enabled_marketplaces: Array.isArray(body.enabledMarketplaces) ? body.enabledMarketplaces : [],
     woo_url: normalizeOptional(body.wooUrl),
     woo_key: normalizeOptional(body.wooKey),
     woo_secret: normalizeOptional(body.wooSecret),
     etsy_bearer: normalizeOptional(body.etsyBearer),
+    etsy_refresh_token: normalizeOptional(body.etsyRefreshToken),
+    etsy_token_expires_at: normalizeOptional(body.etsyTokenExpiresAt),
     etsy_keystring: normalizeOptional(body.etsyKeystring),
     etsy_shop_name: normalizeOptional(body.etsyShopName),
     etsy_skumap_json: parsedSkuMap,
+    amazon_seller_id: normalizeOptional(body.amazonSellerId),
+    amazon_access_key: normalizeOptional(body.amazonAccessKey),
+    amazon_secret_key: normalizeOptional(body.amazonSecretKey),
+    amazon_region: normalizeOptional(body.amazonRegion),
     updated_at: new Date().toISOString(),
   };
 

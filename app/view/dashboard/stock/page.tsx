@@ -279,6 +279,7 @@ export default function StockPage() {
 
     setMsg("");
     setSyncingMarketplaces(true);
+    setMsg("Sync in progress...");
 
     const { data: sessionRes } = await supabase.auth.getSession();
     const accessToken = sessionRes.session?.access_token;
@@ -303,8 +304,15 @@ export default function StockPage() {
         syncedSkuCount?: number;
         requestedSkuCount?: number | null;
         skippedRequestedSkuCount?: number;
+        skippedRequestedSkus?: string[];
         woo?: { enabled?: boolean; updated?: number; missingSkuCount?: number; errors?: string[] };
-        etsy?: { enabled?: boolean; updatedListings?: number; missingSkuCount?: number; errors?: string[] };
+        etsy?: {
+          enabled?: boolean;
+          updatedListings?: number;
+          missingSkuCount?: number;
+          missingSkus?: string[];
+          errors?: string[];
+        };
         errors?: string[];
       };
 
@@ -332,10 +340,15 @@ export default function StockPage() {
           : `Scope: ${payload.syncedSkuCount || 0} SKU(s)`;
       const skippedSummary =
         payload.skippedRequestedSkuCount && payload.skippedRequestedSkuCount > 0
-          ? ` ${payload.skippedRequestedSkuCount} selected SKU(s) were not found in this store.`
+          ? ` ${payload.skippedRequestedSkuCount} selected SKU(s) were not found in this store (${(payload.skippedRequestedSkus || []).slice(0, 3).join(", ")}).`
+          : "";
+      const etsyMissingSku = payload.etsy?.missingSkus?.[0] || "";
+      const etsyMissingSummary =
+        (payload.etsy?.missingSkuCount || 0) > 0
+          ? ` Missing Etsy SKU map for: ${etsyMissingSku || `${payload.etsy?.missingSkuCount} SKU(s)`}.`
           : "";
       setMsg(
-        `Sync complete. ${scopeSummary}. ${wooSummary}. ${etsySummary}.${skippedSummary}${hasErrors ? ` First issue: ${firstError}` : ""}`,
+        `Sync complete. ${scopeSummary}. ${wooSummary}. ${etsySummary}.${etsyMissingSummary}${skippedSummary}${hasErrors ? ` First issue: ${firstError}` : ""}`,
       );
       if (skus && skus.length > 0) setSelectedSyncSkus([]);
     } catch (error) {
@@ -424,6 +437,7 @@ export default function StockPage() {
           </select>
           <span className="text-xs text-slate-500">{selectedSyncSkus.length} SKU(s) selected</span>
         </div>
+        {msg && <p className="mt-3 text-sm text-slate-600">{msg}</p>}
 
         {loading ? (
           <p className="mt-6 text-sm text-slate-500">Loading stock...</p>
@@ -501,7 +515,6 @@ export default function StockPage() {
         </div>
       </article>
 
-      {msg && <p className="text-sm text-slate-600">{msg}</p>}
     </section>
   );
 }
