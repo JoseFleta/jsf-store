@@ -9,6 +9,7 @@ type ProductTypeFilter = "all" | ProductType;
 type ViewMode = "card" | "table";
 type BulkImportPlatform = "woocommerce" | "etsy";
 type BulkPriceImportPlatform = "woocommerce" | "etsy" | "both";
+type SyncSelection = "prices" | "pictures" | "both";
 type SortDirection = "asc" | "desc";
 type ProductSortKey = "sku" | "title" | "type" | "subtype" | "tagline";
 
@@ -310,6 +311,8 @@ export default function ProductsPage() {
   const [previewGallery, setPreviewGallery] = useState<{ urls: string[]; title: string; index: number } | null>(null);
   const [createMediaFiles, setCreateMediaFiles] = useState<File[]>([]);
   const [isAdvancedModalOpen, setIsAdvancedModalOpen] = useState(false);
+  const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
+  const [syncSelection, setSyncSelection] = useState<SyncSelection>("prices");
   const [bulkBasePrice, setBulkBasePrice] = useState("");
   const [bulkWooPrice, setBulkWooPrice] = useState("");
   const [bulkEtsyPrice, setBulkEtsyPrice] = useState("");
@@ -329,6 +332,7 @@ export default function ProductsPage() {
   const [savingEdit, setSavingEdit] = useState(false);
   const [bulkWorking, setBulkWorking] = useState(false);
   const [syncingPrices, setSyncingPrices] = useState(false);
+  const [syncingPictures, setSyncingPictures] = useState(false);
   const [importing, setImporting] = useState(false);
   const [msg, setMsg] = useState("");
   const [csvErrors, setCsvErrors] = useState<string[]>([]);
@@ -681,6 +685,22 @@ export default function ProductsPage() {
     setEditActive(true);
     setMediaMsg("");
   };
+
+  useEffect(() => {
+    if (!editingProduct) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        cancelEdit();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [editingProduct]);
 
   const handleSaveEdit = async () => {
     if (!editingId || !selectedStoreId) return;
@@ -1176,20 +1196,23 @@ export default function ProductsPage() {
     setProgressModal(null);
   };
 
-  const handleSyncPrices = async () => {
+  const handleSyncPrices = async (productIdsOverride?: string[]) => {
     if (!selectedStoreId) return;
     setMsg("");
     setSyncingPrices(true);
 
-    const productIds =
-      selectedProductIds.length > 0 ? selectedProductIds : filteredProducts.map((product) => product.id);
+    const productIds = productIdsOverride && productIdsOverride.length > 0
+      ? productIdsOverride
+      : selectedProductIds.length > 0
+      ? selectedProductIds
+      : filteredProducts.map((product) => product.id);
 
     const { data: sessionRes } = await supabase.auth.getSession();
     const accessToken = sessionRes.session?.access_token;
     if (!accessToken) {
       setSyncingPrices(false);
       setMsg("Session expired. Please sign in again.");
-      return;
+      return false;
     }
 
     try {
@@ -1212,7 +1235,7 @@ export default function ProductsPage() {
       setSyncingPrices(false);
       if (!res.ok) {
         setMsg(payload.error || "Price sync failed.");
-        return;
+        return false;
       }
 
       const wooSummary = payload.woo?.enabled
@@ -1225,10 +1248,111 @@ export default function ProductsPage() {
       setMsg(
         `Price sync complete. Scope: ${payload.syncedSkuCount || 0} SKU(s). ${wooSummary}. ${etsySummary}.${firstError ? ` First issue: ${firstError}` : ""}`,
       );
+      if ((payload.syncedSkuCount || 0) > 0) {
+        showSuccess("Prices Synced", `Price sync completed for ${payload.syncedSkuCount || 0} SKU(s).`);
+      }
+      return true;
     } catch (error) {
       setSyncingPrices(false);
       setMsg(error instanceof Error ? error.message : "Price sync failed.");
+      return false;
     }
+  };
+
+  const handleSyncPictures = async (productIdsOverride?: string[]) => {
+    if (!selectedStoreId) return false;
+    setMsg("");
+    setSyncingPictures(true);
+
+    const productIds =
+      productIdsOverride && productIdsOverride.length > 0
+        ? productIdsOverride
+        : selectedProductIds.length > 0
+          ? selectedProductIds
+          : filteredProducts.map((product) => product.id);
+
+    const { data: sessionRes } = await supabase.auth.getSession();
+    const accessToken = sessionRes.session?.access_token;
+    if (!accessToken) {
+      setSyncingPictures(false);
+      setMsg("Session expired. Please sign in again.");
+      return false;
+    }
+
+    try {
+      const res = await fetch("/api/products/sync-images", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ storeId: selectedStoreId, productIds }),
+      });
+      const payload = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        processedProducts?: number;
+        updatedWooProducts?: number;
+        wooAlreadySyncedProducts?: number;
+        wooEnabled?: boolean;
+        updatedEtsyListings?: number;
+        etsyAlreadySyncedListings?: number;
+        etsyEnabled?: boolean;
+        missingEtsySkuMapCount?: number;
+        skippedNoSku?: number;
+        skippedNoLocalImages?: number;
+        errors?: string[];
+      };
+
+      setSyncingPictures(false);
+      if (!res.ok) {
+        setMsg(payload.error || "Picture sync failed.");
+        return false;
+      }
+
+      const firstError = payload.errors?.[0] || "";
+      const wooSummary = payload.wooEnabled === false
+        ? "Woo: not configured"
+        : `Woo updated: ${payload.updatedWooProducts || 0}. Woo already synced: ${payload.wooAlreadySyncedProducts || 0}`;
+      const etsySummary = payload.etsyEnabled === false
+        ? " Etsy: not configured."
+        : ` Etsy updated: ${payload.updatedEtsyListings || 0}. Etsy already synced: ${payload.etsyAlreadySyncedListings || 0}. Missing SKU map: ${payload.missingEtsySkuMapCount || 0}.`;
+      setMsg(
+        `Picture sync complete. Processed: ${payload.processedProducts || 0}. ${wooSummary}.${etsySummary} Skipped (no SKU): ${payload.skippedNoSku || 0}. Skipped (no local images): ${payload.skippedNoLocalImages || 0}.${firstError ? ` First issue: ${firstError}` : ""}`,
+      );
+      const wooUpdated = payload.updatedWooProducts || 0;
+      const wooAlreadySynced = payload.wooAlreadySyncedProducts || 0;
+      const etsyUpdated = payload.updatedEtsyListings || 0;
+      const etsyAlreadySynced = payload.etsyAlreadySyncedListings || 0;
+      if (wooUpdated > 0 || wooAlreadySynced > 0 || etsyUpdated > 0 || etsyAlreadySynced > 0) {
+        showSuccess(
+          "Pictures Synced",
+          `Processed ${payload.processedProducts || 0} product(s). Woo updated: ${wooUpdated}. Woo already synced: ${wooAlreadySynced}. Etsy updated: ${etsyUpdated}. Etsy already synced: ${etsyAlreadySynced}.`,
+        );
+      }
+      return true;
+    } catch (error) {
+      setSyncingPictures(false);
+      setMsg(error instanceof Error ? error.message : "Picture sync failed.");
+      return false;
+    }
+  };
+
+  const handleRunSyncAction = async () => {
+    if (!selectedStoreId || selectedProductIds.length === 0) return;
+
+    if (syncSelection === "prices") {
+      await handleSyncPrices(selectedProductIds);
+      return;
+    }
+
+    if (syncSelection === "pictures") {
+      await handleSyncPictures(selectedProductIds);
+      return;
+    }
+
+    const pricesOk = await handleSyncPrices(selectedProductIds);
+    if (!pricesOk) return;
+    await handleSyncPictures(selectedProductIds);
   };
 
   const refreshProductImages = async () => {
@@ -1315,36 +1439,6 @@ export default function ProductsPage() {
     }
   };
 
-  const handleSetPrimaryImage = async (image: ProductImageRow) => {
-    if (!editingProduct || !selectedStoreId) return;
-    setMediaMsg("");
-
-    const { error: clearError } = await supabase
-      .from("product_images")
-      .update({ is_primary: false })
-      .eq("store_id", selectedStoreId)
-      .eq("product_id", editingProduct.id);
-
-    if (clearError) {
-      setMediaMsg(clearError.message);
-      return;
-    }
-
-    const { error: setError } = await supabase
-      .from("product_images")
-      .update({ is_primary: true })
-      .eq("id", image.id)
-      .eq("store_id", selectedStoreId);
-
-    if (setError) {
-      setMediaMsg(setError.message);
-      return;
-    }
-
-    await refreshProductImages();
-    setMediaMsg("Cover image updated.");
-  };
-
   const handleDeleteImage = async (image: ProductImageRow) => {
     if (!editingProduct || !selectedStoreId) return;
     setMediaMsg("");
@@ -1387,7 +1481,7 @@ export default function ProductsPage() {
     const updates = reordered.map((img, sortOrder) =>
       supabase
         .from("product_images")
-        .update({ sort_order: sortOrder })
+        .update({ sort_order: sortOrder, is_primary: sortOrder === 0 })
         .eq("id", img.id)
         .eq("store_id", selectedStoreId),
     );
@@ -1442,14 +1536,6 @@ export default function ProductsPage() {
               disabled={!selectedStoreId}
             >
               Import CSV
-            </button>
-            <button
-              type="button"
-              className="rounded-full border border-blue-300 bg-white px-5 py-2 text-sm font-semibold text-blue-700 shadow-sm transition hover:border-blue-400 disabled:opacity-60"
-              onClick={handleSyncPrices}
-              disabled={!selectedStoreId || syncingPrices || filteredProducts.length === 0}
-            >
-              {syncingPrices ? "Syncing..." : `Sync prices${selectedProductIds.length > 0 ? ` (${selectedProductIds.length})` : ""}`}
             </button>
           </div>
         </div>
@@ -1596,6 +1682,14 @@ export default function ProductsPage() {
                 >
                   Advanced
                 </button>
+                <button
+                  type="button"
+                  className="rounded-full border border-blue-300 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+                  onClick={() => setIsSyncModalOpen(true)}
+                  disabled={selectedProductIds.length === 0 || syncingPrices || syncingPictures || anyAdvancedWorking}
+                >
+                  {syncingPrices || syncingPictures || anyAdvancedWorking ? "Syncing..." : "Sync"}
+                </button>
               </div>
             )}
             <div className="flex items-center gap-2">
@@ -1647,7 +1741,7 @@ export default function ProductsPage() {
           <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {paginatedProducts.map((product) => {
               const mediaList = productImagesByProductId[product.id] || [];
-              const primaryImage = mediaList.find((image) => image.is_primary) || mediaList[0];
+              const primaryImage = mediaList[0];
               return (
                 <article key={product.id} className="relative overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
                   <div className="relative h-56 w-full bg-slate-100">
@@ -1735,7 +1829,7 @@ export default function ProductsPage() {
               <tbody className="divide-y divide-slate-100">
                 {paginatedProducts.map((product) => {
                   const mediaList = productImagesByProductId[product.id] || [];
-                  const primaryImage = mediaList.find((image) => image.is_primary) || mediaList[0];
+                  const primaryImage = mediaList[0];
                   return (
                     <tr key={product.id} className="align-middle">
                       <td className="px-3 py-3">
@@ -1899,6 +1993,85 @@ export default function ProductsPage() {
                 }}
               >
                 Start import
+              </button>
+            </div>
+          </article>
+        </div>
+      )}
+
+      {isSyncModalOpen && (
+        <div className="fixed inset-0 z-[72] flex items-center justify-center bg-slate-900/45 p-4" onClick={() => setIsSyncModalOpen(false)}>
+          <article
+            className="w-full max-w-xl rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900">Sync Products</h2>
+                <p className="mt-1 text-sm text-slate-500">{selectedProductIds.length} product(s) selected.</p>
+              </div>
+              <button
+                type="button"
+                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700"
+                onClick={() => setIsSyncModalOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              <p className="text-xs font-medium uppercase tracking-wide text-slate-500">What do you want to sync?</p>
+              <p className="text-xs text-slate-500">Pictures sync uses your local media as source of truth.</p>
+              <label className="flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="radio"
+                  name="sync-selection"
+                  value="prices"
+                  checked={syncSelection === "prices"}
+                  onChange={() => setSyncSelection("prices")}
+                />
+                Prices
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="radio"
+                  name="sync-selection"
+                  value="pictures"
+                  checked={syncSelection === "pictures"}
+                  onChange={() => setSyncSelection("pictures")}
+                />
+                Pictures
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="radio"
+                  name="sync-selection"
+                  value="both"
+                  checked={syncSelection === "both"}
+                  onChange={() => setSyncSelection("both")}
+                />
+                Both
+              </label>
+            </div>
+
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-full border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
+                onClick={() => setIsSyncModalOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                onClick={() => {
+                  void handleRunSyncAction();
+                  setIsSyncModalOpen(false);
+                }}
+                disabled={selectedProductIds.length === 0 || syncingPrices || syncingPictures || importingMarketplaceImages}
+              >
+                {syncingPrices || syncingPictures || importingMarketplaceImages ? "Syncing..." : "Start sync"}
               </button>
             </div>
           </article>
@@ -2346,17 +2519,29 @@ export default function ProductsPage() {
                     No images uploaded yet.
                   </p>
                 ) : (
-                  currentMediaList.map((image) => (
+                  currentMediaList.map((image, index) => {
+                    const isDragging = draggingImageId === image.id;
+                    return (
                     <article
                       key={image.id}
-                      className={`rounded-2xl border bg-white p-3 transition ${
-                        dragOverImageId === image.id ? "border-indigo-400 ring-2 ring-indigo-100" : "border-slate-200"
-                      }`}
+                      className={`rounded-2xl border bg-white p-3 transition-all duration-200 ${
+                        isDragging
+                          ? "cursor-grabbing border-indigo-300 ring-2 ring-indigo-100 opacity-60 scale-[0.98] shadow-md"
+                          : "cursor-grab border-slate-200"
+                      } ${dragOverImageId === image.id && !isDragging ? "border-indigo-400 ring-2 ring-indigo-100 -translate-y-0.5 shadow-md" : ""}`}
                       draggable={!mediaReordering}
-                      onDragStart={() => setDraggingImageId(image.id)}
+                      onDragStart={(e) => {
+                        e.dataTransfer.effectAllowed = "move";
+                        e.dataTransfer.setData("text/plain", image.id);
+                        setDraggingImageId(image.id);
+                      }}
                       onDragEnd={() => {
                         setDraggingImageId(null);
                         setDragOverImageId(null);
+                      }}
+                      onDragEnter={(e) => {
+                        e.preventDefault();
+                        if (draggingImageId && draggingImageId !== image.id) setDragOverImageId(image.id);
                       }}
                       onDragOver={(e) => {
                         e.preventDefault();
@@ -2365,6 +2550,7 @@ export default function ProductsPage() {
                       onDrop={(e) => {
                         e.preventDefault();
                         if (!draggingImageId || draggingImageId === image.id) return;
+                        setDragOverImageId(null);
                         void handleReorderImages(draggingImageId, image.id);
                       }}
                     >
@@ -2374,6 +2560,9 @@ export default function ProductsPage() {
                           alt={`${editingProduct.title} media`}
                           className="h-40 w-full rounded-xl border border-slate-200 object-cover"
                         />
+                        <div className="absolute left-2 top-2 inline-flex items-center rounded-full border border-slate-200 bg-white/95 px-2 py-1 text-[11px] font-semibold text-slate-600 shadow-sm">
+                          <span className="leading-none">::</span>
+                        </div>
                         <button
                           type="button"
                           className="absolute right-2 top-2 rounded-full border border-slate-200 bg-white/95 px-2.5 py-1 text-[11px] font-semibold text-slate-700 shadow-sm hover:border-slate-400"
@@ -2384,18 +2573,9 @@ export default function ProductsPage() {
                       </div>
                       <div className="mt-3 flex items-center justify-between gap-2">
                         <span className="text-xs text-slate-500">
-                          {image.is_primary ? "Cover image" : "Image"} {draggingImageId === image.id ? "(moving...)" : ""}
+                          {index === 0 ? "Cover image" : "Image"} {draggingImageId === image.id ? "(moving...)" : ""}
                         </span>
                         <div className="flex gap-2">
-                          {!image.is_primary && (
-                            <button
-                              type="button"
-                              className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-slate-400"
-                              onClick={() => handleSetPrimaryImage(image)}
-                            >
-                              Set cover
-                            </button>
-                          )}
                           <button
                             type="button"
                             className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
@@ -2406,7 +2586,8 @@ export default function ProductsPage() {
                         </div>
                       </div>
                     </article>
-                  ))
+                    );
+                  })
                 )}
               </div>
             </div>

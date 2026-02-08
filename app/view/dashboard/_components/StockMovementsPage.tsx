@@ -897,7 +897,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
 
   return (
     <section className="space-y-6">
-      <header className="relative overflow-hidden rounded-[28px] border border-slate-300 bg-gradient-to-br from-slate-100 via-white to-blue-100 p-6 shadow-sm">
+      <header className="relative overflow-visible rounded-[28px] border border-slate-300 bg-gradient-to-br from-slate-100 via-white to-blue-100 p-6 shadow-sm">
         <div className="absolute -right-14 -top-16 h-40 w-40 rounded-full bg-slate-300/30 blur-2xl" />
         <div className="absolute -bottom-14 left-20 h-36 w-36 rounded-full bg-blue-300/25 blur-2xl" />
         <div className="relative">
@@ -996,7 +996,7 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
                 </button>
               )}
               {isDateRangeOpen && (
-                <div className="absolute z-20 mt-2 rounded-2xl border border-slate-200 bg-white p-3 shadow-xl">
+                <div className="absolute z-50 mt-2 rounded-2xl border border-slate-200 bg-white p-3 shadow-xl">
                   <DayPicker
                     mode="range"
                     min={1}
