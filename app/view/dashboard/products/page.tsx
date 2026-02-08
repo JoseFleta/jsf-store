@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabaseBrowser } from "../../../../lib/supabaseBrowser";
 
@@ -11,7 +11,7 @@ type BulkImportPlatform = "woocommerce" | "etsy";
 type BulkPriceImportPlatform = "woocommerce" | "etsy" | "both";
 type SyncSelection = "prices" | "pictures" | "both";
 type SortDirection = "asc" | "desc";
-type ProductSortKey = "sku" | "title" | "type" | "subtype" | "tagline";
+type ProductSortKey = "title" | "price" | "stock";
 
 type ProductRow = {
   id: string;
@@ -53,6 +53,18 @@ type ProductImageRow = {
   sort_order: number;
   is_primary: boolean;
   created_at: string;
+};
+
+type StockMovementRow = {
+  product_id: string;
+  movement_type: "purchase" | "sale";
+  quantity: number;
+  qty_change?: number | null;
+};
+
+type ConnectedMarketplaces = {
+  woo: boolean;
+  etsy: boolean;
 };
 
 const PRODUCT_TYPES: ProductType[] = ["ropa", "maquetas", "accesorios"];
@@ -280,7 +292,6 @@ export default function ProductsPage() {
   const [basePrice, setBasePrice] = useState("0.00");
   const [wooPrice, setWooPrice] = useState("");
   const [etsyPrice, setEtsyPrice] = useState("");
-  const [isActive, setIsActive] = useState(true);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
 
@@ -298,7 +309,6 @@ export default function ProductsPage() {
   const [editBasePrice, setEditBasePrice] = useState("");
   const [editWooPrice, setEditWooPrice] = useState("");
   const [editEtsyPrice, setEditEtsyPrice] = useState("");
-  const [editActive, setEditActive] = useState(true);
 
   const [pageSize, setPageSize] = useState(10);
   const [page, setPage] = useState(1);
@@ -326,6 +336,10 @@ export default function ProductsPage() {
   const [isImageImportPromptOpen, setIsImageImportPromptOpen] = useState(false);
   const [useImageFallback, setUseImageFallback] = useState(true);
   const [successModal, setSuccessModal] = useState<{ title: string; message: string } | null>(null);
+  const [publishPreviewModalOpen, setPublishPreviewModalOpen] = useState(false);
+  const [publishingEdit, setPublishingEdit] = useState(false);
+  const [deletingEdit, setDeletingEdit] = useState(false);
+  const [connectedMarketplaces, setConnectedMarketplaces] = useState<ConnectedMarketplaces>({ woo: false, etsy: false });
 
   const [loadingProducts, setLoadingProducts] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -337,6 +351,9 @@ export default function ProductsPage() {
   const [msg, setMsg] = useState("");
   const [csvErrors, setCsvErrors] = useState<string[]>([]);
   const [productImagesByProductId, setProductImagesByProductId] = useState<Record<string, ProductImageRow[]>>({});
+  const [stockByProductId, setStockByProductId] = useState<Record<string, number>>({});
+  const [stockLoaded, setStockLoaded] = useState(false);
+  const statusReconcileInFlightRef = useRef(false);
   const [mediaLoading, setMediaLoading] = useState(false);
   const [mediaUploading, setMediaUploading] = useState(false);
   const [mediaReordering, setMediaReordering] = useState(false);
@@ -436,6 +453,161 @@ export default function ProductsPage() {
     };
   }, [selectedStoreId, supabase]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadConnectedMarketplaces = async () => {
+      if (!selectedStoreId) {
+        setConnectedMarketplaces({ woo: false, etsy: false });
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("store_integrations")
+        .select("woo_url,woo_key,woo_secret,etsy_bearer,etsy_keystring,etsy_shop_name,etsy_skumap_json")
+        .eq("store_id", selectedStoreId)
+        .maybeSingle();
+
+      if (cancelled) return;
+      if (error || !data) {
+        setConnectedMarketplaces({ woo: false, etsy: false });
+        return;
+      }
+
+      const wooConfigured = Boolean(data.woo_url && data.woo_key && data.woo_secret);
+      const etsyConfigured = Boolean(
+        data.etsy_bearer &&
+          data.etsy_keystring &&
+          data.etsy_shop_name &&
+          data.etsy_skumap_json &&
+          Object.keys(data.etsy_skumap_json || {}).length > 0,
+      );
+      setConnectedMarketplaces({ woo: wooConfigured, etsy: etsyConfigured });
+    };
+
+    void loadConnectedMarketplaces();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedStoreId, supabase]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadStockByProduct = async () => {
+      if (!selectedStoreId) {
+        setStockByProductId({});
+        setStockLoaded(false);
+        return;
+      }
+
+      setStockLoaded(false);
+      const { data, error } = await supabase
+        .from("stock_movements")
+        .select("product_id,movement_type,quantity,qty_change")
+        .eq("store_id", selectedStoreId);
+
+      if (cancelled) return;
+      if (error) {
+        setMsg(error.message);
+        setStockByProductId({});
+        setStockLoaded(false);
+        return;
+      }
+
+      const nextStockByProductId: Record<string, number> = {};
+      for (const movement of (data ?? []) as StockMovementRow[]) {
+        const signedQty =
+          typeof movement.qty_change === "number"
+            ? Number(movement.qty_change)
+            : movement.movement_type === "purchase"
+            ? Number(movement.quantity || 0)
+            : -Number(movement.quantity || 0);
+        nextStockByProductId[movement.product_id] = (nextStockByProductId[movement.product_id] || 0) + signedQty;
+      }
+      setStockByProductId(nextStockByProductId);
+      setStockLoaded(true);
+    };
+
+    loadStockByProduct();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedStoreId, supabase]);
+
+  useEffect(() => {
+    if (!selectedStoreId || !stockLoaded || products.length === 0 || statusReconcileInFlightRef.current) return;
+
+    const mismatched = products.filter((product) => {
+      const shouldBeActive = (stockByProductId[product.id] ?? 0) > 0;
+      return product.is_active !== shouldBeActive;
+    });
+    if (mismatched.length === 0) return;
+
+    let cancelled = false;
+    statusReconcileInFlightRef.current = true;
+
+    const reconcileStatuses = async () => {
+      try {
+        const activateIds = mismatched.filter((p) => (stockByProductId[p.id] ?? 0) > 0).map((p) => p.id);
+        const deactivateIds = mismatched.filter((p) => (stockByProductId[p.id] ?? 0) <= 0).map((p) => p.id);
+
+        if (activateIds.length > 0) {
+          const { error } = await supabase
+            .from("products")
+            .update({ is_active: true })
+            .eq("store_id", selectedStoreId)
+            .in("id", activateIds);
+          if (error) throw new Error(error.message);
+        }
+
+        if (deactivateIds.length > 0) {
+          const { error } = await supabase
+            .from("products")
+            .update({ is_active: false })
+            .eq("store_id", selectedStoreId)
+            .in("id", deactivateIds);
+          if (error) throw new Error(error.message);
+        }
+
+        if (cancelled) return;
+
+        setProducts((prev) =>
+          prev.map((product) => ({
+            ...product,
+            is_active: (stockByProductId[product.id] ?? 0) > 0,
+          })),
+        );
+
+        const { data: sessionRes } = await supabase.auth.getSession();
+        const accessToken = sessionRes.session?.access_token;
+        if (!accessToken) return;
+
+        await fetch("/api/stock/sync-marketplaces", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            storeId: selectedStoreId,
+            skus: mismatched.map((product) => product.sku),
+          }),
+        });
+      } catch (error) {
+        if (!cancelled) setMsg(error instanceof Error ? error.message : "Status sync failed.");
+      } finally {
+        statusReconcileInFlightRef.current = false;
+      }
+    };
+
+    void reconcileStatuses();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [products, selectedStoreId, stockByProductId, stockLoaded, supabase]);
+
   const filteredProducts = useMemo(() => {
     const term = search.trim().toLowerCase();
     return products.filter((p) => {
@@ -454,15 +626,13 @@ export default function ProductsPage() {
     const next = [...filteredProducts];
     next.sort((a, b) => {
       let cmp = 0;
-      if (sort.key === "sku") cmp = compareText(a.sku || "", b.sku || "");
       if (sort.key === "title") cmp = compareText(a.title || "", b.title || "");
-      if (sort.key === "type") cmp = compareText(getTypeLabel(a.product_type), getTypeLabel(b.product_type));
-      if (sort.key === "subtype") cmp = compareText(getProductSubtype(a, productTypeFilter), getProductSubtype(b, productTypeFilter));
-      if (sort.key === "tagline") cmp = compareText(a.catchy_phrase || "", b.catchy_phrase || "");
+      if (sort.key === "price") cmp = Number(a.base_price || 0) - Number(b.base_price || 0);
+      if (sort.key === "stock") cmp = Number(stockByProductId[a.id] || 0) - Number(stockByProductId[b.id] || 0);
       return sort.direction === "asc" ? cmp : -cmp;
     });
     return next;
-  }, [filteredProducts, sort, productTypeFilter]);
+  }, [filteredProducts, sort, stockByProductId]);
 
   const totalPages = Math.max(1, Math.ceil(sortedProducts.length / pageSize));
 
@@ -524,10 +694,10 @@ export default function ProductsPage() {
 
   const downloadCsvTemplate = () => {
     const sample = [
-      "sku,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,base_price,woo_price,etsy_price,is_active",
-      "MODEL-737,Maqueta B737,maquetas,1:400,,,Jet clasico,49.99,52.99,54.99,true",
-      "CAMI-NEGRA,Camiseta Negra,ropa,,Camiseta,,Algodon premium,19.90,21.50,22.00,true",
-      "CASE-LOGO,Accesorio Logo,accesorios,,,Llavero,Edicion limitada,6.50,,,true",
+      "sku,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,base_price,woo_price,etsy_price",
+      "MODEL-737,Maqueta B737,maquetas,1:400,,,Jet clasico,49.99,52.99,54.99",
+      "CAMI-NEGRA,Camiseta Negra,ropa,,Camiseta,,Algodon premium,19.90,21.50,22.00",
+      "CASE-LOGO,Accesorio Logo,accesorios,,,Llavero,Edicion limitada,6.50,,",
     ].join("\n");
 
     const blob = new Blob([sample], { type: "text/csv;charset=utf-8;" });
@@ -612,7 +782,7 @@ export default function ProductsPage() {
         base_price: basePriceValue,
         woo_price: wooPriceValue,
         etsy_price: etsyPriceValue,
-        is_active: isActive,
+        is_active: false,
       })
       .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,base_price,woo_price,etsy_price,is_active,created_at")
       .single();
@@ -646,7 +816,6 @@ export default function ProductsPage() {
     setBasePrice("0.00");
     setWooPrice("");
     setEtsyPrice("");
-    setIsActive(true);
     setCreateMediaFiles([]);
     setIsCreateModalOpen(false);
     setMsg(`Product created.${createMediaSummary}`);
@@ -665,7 +834,6 @@ export default function ProductsPage() {
     setEditBasePrice(product.base_price.toFixed(2));
     setEditWooPrice(product.woo_price == null ? "" : product.woo_price.toFixed(2));
     setEditEtsyPrice(product.etsy_price == null ? "" : product.etsy_price.toFixed(2));
-    setEditActive(product.is_active);
     setMsg("");
     setCsvErrors([]);
   };
@@ -682,7 +850,6 @@ export default function ProductsPage() {
     setEditBasePrice("");
     setEditWooPrice("");
     setEditEtsyPrice("");
-    setEditActive(true);
     setMediaMsg("");
   };
 
@@ -702,8 +869,10 @@ export default function ProductsPage() {
     };
   }, [editingProduct]);
 
-  const handleSaveEdit = async () => {
-    if (!editingId || !selectedStoreId) return;
+  const handleSaveEdit = async (options?: { closeOnSuccess?: boolean; showFeedback?: boolean }) => {
+    if (!editingId || !selectedStoreId) return false;
+    const closeOnSuccess = options?.closeOnSuccess ?? true;
+    const showFeedback = options?.showFeedback ?? true;
 
     const skuValue = editSku.trim().toUpperCase();
     const titleValue = editTitle.trim();
@@ -717,11 +886,11 @@ export default function ProductsPage() {
 
     if (!skuValue || !titleValue) {
       setMsg("SKU and title are required.");
-      return;
+      return false;
     }
     if (basePriceValue == null) {
       setMsg("Base price is required and must be 0 or greater.");
-      return;
+      return false;
     }
 
     setSavingEdit(true);
@@ -739,7 +908,6 @@ export default function ProductsPage() {
         base_price: basePriceValue,
         woo_price: wooPriceValue,
         etsy_price: etsyPriceValue,
-        is_active: editActive,
       })
       .eq("id", editingId)
       .eq("store_id", selectedStoreId)
@@ -749,32 +917,37 @@ export default function ProductsPage() {
 
     if (error) {
       setMsg(error.message);
-      return;
+      return false;
     }
 
     setProducts((prev) => prev.map((p) => (p.id === editingId ? normalizeProductRow(data as ProductRow) : p)));
-    cancelEdit();
-    setMsg("Product updated.");
+    if (closeOnSuccess) cancelEdit();
+    if (showFeedback) setMsg("Product updated.");
+    return true;
   };
 
-  const handleSoftDelete = async (product: ProductRow) => {
-    if (!selectedStoreId) return;
+  const handleDeleteEditingProduct = async () => {
+    if (!editingProduct || !selectedStoreId) return;
+    const confirmed = window.confirm(`Delete product ${editingProduct.sku} - ${editingProduct.title}?`);
+    if (!confirmed) return;
 
-    const { data, error } = await supabase
-      .from("products")
-      .update({ is_active: false })
-      .eq("id", product.id)
-      .eq("store_id", selectedStoreId)
-      .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,base_price,woo_price,etsy_price,is_active,created_at")
-      .single();
+    setDeletingEdit(true);
+    const { error } = await supabase.from("products").delete().eq("store_id", selectedStoreId).eq("id", editingProduct.id);
+    setDeletingEdit(false);
 
     if (error) {
       setMsg(error.message);
       return;
     }
 
-    setProducts((prev) => prev.map((p) => (p.id === product.id ? normalizeProductRow(data as ProductRow) : p)));
-    setMsg("Product deactivated.");
+    setProducts((prev) => prev.filter((product) => product.id !== editingProduct.id));
+    setProductImagesByProductId((prev) => {
+      const next = { ...prev };
+      delete next[editingProduct.id];
+      return next;
+    });
+    cancelEdit();
+    setMsg("Product deleted.");
   };
 
   const handleImportCsv = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -822,7 +995,7 @@ export default function ProductsPage() {
       base_price: row.base_price ?? 0,
       woo_price: row.woo_price ?? null,
       etsy_price: row.etsy_price ?? null,
-      is_active: row.is_active,
+      is_active: false,
     }));
 
     const chunkSize = 500;
@@ -879,27 +1052,6 @@ export default function ProductsPage() {
       setSelectedProductIds(filteredProducts.map((product) => product.id));
       return;
     }
-    setSelectedProductIds([]);
-  };
-
-  const handleBulkSetActive = async (nextActive: boolean) => {
-    if (!selectedStoreId || selectedProductIds.length === 0) return;
-    setMsg("");
-    setBulkWorking(true);
-    const { error } = await supabase
-      .from("products")
-      .update({ is_active: nextActive })
-      .eq("store_id", selectedStoreId)
-      .in("id", selectedProductIds);
-    setBulkWorking(false);
-
-    if (error) {
-      setMsg(error.message);
-      return;
-    }
-
-    setProducts((prev) => prev.map((p) => (selectedProductIds.includes(p.id) ? { ...p, is_active: nextActive } : p)));
-    setMsg(nextActive ? "Products activated." : "Products deactivated.");
     setSelectedProductIds([]);
   };
 
@@ -1196,9 +1348,14 @@ export default function ProductsPage() {
     setProgressModal(null);
   };
 
-  const handleSyncPrices = async (productIdsOverride?: string[]) => {
+  const handleSyncPrices = async (
+    productIdsOverride?: string[],
+    options?: { showFeedback?: boolean; showSuccessModal?: boolean },
+  ) => {
+    const showFeedback = options?.showFeedback ?? true;
+    const showSuccessModal = options?.showSuccessModal ?? true;
     if (!selectedStoreId) return;
-    setMsg("");
+    if (showFeedback) setMsg("");
     setSyncingPrices(true);
 
     const productIds = productIdsOverride && productIdsOverride.length > 0
@@ -1245,10 +1402,12 @@ export default function ProductsPage() {
         ? `Etsy: ${payload.etsy.updatedListings || 0} listings updated, ${payload.etsy.missingSkuCount || 0} missing SKU map`
         : "Etsy: not configured";
       const firstError = payload.errors?.[0] || payload.woo?.errors?.[0] || payload.etsy?.errors?.[0] || "";
-      setMsg(
-        `Price sync complete. Scope: ${payload.syncedSkuCount || 0} SKU(s). ${wooSummary}. ${etsySummary}.${firstError ? ` First issue: ${firstError}` : ""}`,
-      );
-      if ((payload.syncedSkuCount || 0) > 0) {
+      if (showFeedback) {
+        setMsg(
+          `Price sync complete. Scope: ${payload.syncedSkuCount || 0} SKU(s). ${wooSummary}. ${etsySummary}.${firstError ? ` First issue: ${firstError}` : ""}`,
+        );
+      }
+      if (showSuccessModal && (payload.syncedSkuCount || 0) > 0) {
         showSuccess("Prices Synced", `Price sync completed for ${payload.syncedSkuCount || 0} SKU(s).`);
       }
       return true;
@@ -1259,9 +1418,14 @@ export default function ProductsPage() {
     }
   };
 
-  const handleSyncPictures = async (productIdsOverride?: string[]) => {
+  const handleSyncPictures = async (
+    productIdsOverride?: string[],
+    options?: { showFeedback?: boolean; showSuccessModal?: boolean },
+  ) => {
+    const showFeedback = options?.showFeedback ?? true;
+    const showSuccessModal = options?.showSuccessModal ?? true;
     if (!selectedStoreId) return false;
-    setMsg("");
+    if (showFeedback) setMsg("");
     setSyncingPictures(true);
 
     const productIds =
@@ -1316,14 +1480,19 @@ export default function ProductsPage() {
       const etsySummary = payload.etsyEnabled === false
         ? " Etsy: not configured."
         : ` Etsy updated: ${payload.updatedEtsyListings || 0}. Etsy already synced: ${payload.etsyAlreadySyncedListings || 0}. Missing SKU map: ${payload.missingEtsySkuMapCount || 0}.`;
-      setMsg(
-        `Picture sync complete. Processed: ${payload.processedProducts || 0}. ${wooSummary}.${etsySummary} Skipped (no SKU): ${payload.skippedNoSku || 0}. Skipped (no local images): ${payload.skippedNoLocalImages || 0}.${firstError ? ` First issue: ${firstError}` : ""}`,
-      );
+      if (showFeedback) {
+        setMsg(
+          `Picture sync complete. Processed: ${payload.processedProducts || 0}. ${wooSummary}.${etsySummary} Skipped (no SKU): ${payload.skippedNoSku || 0}. Skipped (no local images): ${payload.skippedNoLocalImages || 0}.${firstError ? ` First issue: ${firstError}` : ""}`,
+        );
+      }
       const wooUpdated = payload.updatedWooProducts || 0;
       const wooAlreadySynced = payload.wooAlreadySyncedProducts || 0;
       const etsyUpdated = payload.updatedEtsyListings || 0;
       const etsyAlreadySynced = payload.etsyAlreadySyncedListings || 0;
-      if (wooUpdated > 0 || wooAlreadySynced > 0 || etsyUpdated > 0 || etsyAlreadySynced > 0) {
+      if (
+        showSuccessModal &&
+        (wooUpdated > 0 || wooAlreadySynced > 0 || etsyUpdated > 0 || etsyAlreadySynced > 0)
+      ) {
         showSuccess(
           "Pictures Synced",
           `Processed ${payload.processedProducts || 0} product(s). Woo updated: ${wooUpdated}. Woo already synced: ${wooAlreadySynced}. Etsy updated: ${etsyUpdated}. Etsy already synced: ${etsyAlreadySynced}.`,
@@ -1353,6 +1522,39 @@ export default function ProductsPage() {
     const pricesOk = await handleSyncPrices(selectedProductIds);
     if (!pricesOk) return;
     await handleSyncPictures(selectedProductIds);
+  };
+
+  const getPublishUpdateLabels = () => {
+    const updates: string[] = [];
+    if (connectedMarketplaces.etsy) updates.push("Etsy price and photos");
+    if (connectedMarketplaces.woo) updates.push("WooCommerce price and photos");
+    if (updates.length === 0) updates.push("No connected marketplace (local save only)");
+    return updates;
+  };
+
+  const handleSaveAndPublish = async () => {
+    if (!editingProduct) return;
+    setPublishingEdit(true);
+    const saved = await handleSaveEdit({ closeOnSuccess: false, showFeedback: false });
+    if (!saved) {
+      setPublishingEdit(false);
+      return;
+    }
+
+    const productIds = [editingProduct.id];
+    const pricesOk = await handleSyncPrices(productIds, { showFeedback: false, showSuccessModal: false });
+    const picturesOk = await handleSyncPictures(productIds, { showFeedback: false, showSuccessModal: false });
+    setPublishingEdit(false);
+    setPublishPreviewModalOpen(false);
+
+    if (pricesOk && picturesOk) {
+      showSuccess("Saved and Published", `Published updates for ${editingProduct.sku} to connected marketplaces.`);
+      setMsg("Product saved and published.");
+      cancelEdit();
+      return;
+    }
+
+    setMsg("Product saved, but publish had issues. Check sync details.");
   };
 
   const refreshProductImages = async () => {
@@ -1546,7 +1748,7 @@ export default function ProductsPage() {
             <p className="mt-1 text-xl font-semibold text-slate-900">{stats.total}</p>
           </div>
           <div className="rounded-2xl border border-slate-200 bg-white/90 px-4 py-3">
-            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Active (filter)</p>
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Type filter</p>
             <p className="mt-1 text-xl font-semibold text-slate-900">{stats.active}</p>
           </div>
         </div>
@@ -1652,22 +1854,6 @@ export default function ProductsPage() {
                 </button>
                 <button
                   type="button"
-                  className="rounded-full border border-blue-200 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50 disabled:opacity-50"
-                  onClick={() => handleBulkSetActive(true)}
-                  disabled={selectedProductIds.length === 0 || bulkWorking}
-                >
-                  Activate
-                </button>
-                <button
-                  type="button"
-                  className="rounded-full border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-                  onClick={() => handleBulkSetActive(false)}
-                  disabled={selectedProductIds.length === 0 || bulkWorking}
-                >
-                  Deactivate
-                </button>
-                <button
-                  type="button"
                   className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
                   onClick={handleBulkDelete}
                   disabled={selectedProductIds.length === 0 || bulkWorking}
@@ -1705,10 +1891,8 @@ export default function ProductsPage() {
                 }
               >
                 <option value="title">Title</option>
-                <option value="sku">SKU</option>
-                <option value="type">Type</option>
-                <option value="subtype">{getSubtypeLabel(productTypeFilter)}</option>
-                <option value="tagline">Tagline</option>
+                <option value="price">Price</option>
+                <option value="stock">Stock</option>
               </select>
               <button
                 type="button"
@@ -1742,8 +1926,21 @@ export default function ProductsPage() {
             {paginatedProducts.map((product) => {
               const mediaList = productImagesByProductId[product.id] || [];
               const primaryImage = mediaList[0];
+              const currentStock = stockByProductId[product.id] ?? 0;
               return (
-                <article key={product.id} className="relative overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                <article
+                  key={product.id}
+                  role="button"
+                  tabIndex={0}
+                  className="relative overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-slate-200"
+                  onClick={() => startEdit(product)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      startEdit(product);
+                    }
+                  }}
+                >
                   <div className="relative h-56 w-full bg-slate-100">
                     {primaryImage ? (
                       <>
@@ -1755,7 +1952,10 @@ export default function ProductsPage() {
                         <button
                           type="button"
                           className="absolute right-3 top-3 rounded-full border border-slate-200 bg-white/95 px-2.5 py-1 text-[11px] font-semibold text-slate-700 shadow-sm hover:border-slate-400"
-                          onClick={() => openImagePreview(mediaList, product.title, primaryImage.storage_path)}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openImagePreview(mediaList, product.title, primaryImage.storage_path);
+                          }}
                         >
                           View
                         </button>
@@ -1780,26 +1980,10 @@ export default function ProductsPage() {
                       <div className="text-right text-xs text-slate-500">
                         <p>{getTypeLabel(product.product_type)}</p>
                         <p>{mediaList.length} image(s)</p>
+                        <p>Stock: {currentStock.toFixed(0)}</p>
                       </div>
                     </div>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-slate-400"
-                        onClick={() => startEdit(product)}
-                      >
-                        Details
-                      </button>
-                      {product.is_active && (
-                        <button
-                          type="button"
-                          className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
-                          onClick={() => handleSoftDelete(product)}
-                        >
-                          Deactivate
-                        </button>
-                      )}
-                    </div>
+                    <p className="text-xs font-medium text-slate-500">Click card to open details.</p>
                   </div>
                 </article>
               );
@@ -1819,23 +2003,27 @@ export default function ProductsPage() {
                     />
                   </th>
                   <th className="px-3 py-3 text-left">Photo</th>
-                  <th className="px-3 py-3 text-left">Title</th>
-                  <th className="px-3 py-3 text-left">SKU</th>
-                  <th className="px-3 py-3 text-left">Type</th>
-                  <th className="px-3 py-3 text-left">Base price</th>
-                  <th className="px-3 py-3 text-right">Actions</th>
+                  <th className="px-3 py-3 text-left">Name</th>
+                  <th className="px-3 py-3 text-left">Price</th>
+                  <th className="px-3 py-3 text-left">Stock</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {paginatedProducts.map((product) => {
                   const mediaList = productImagesByProductId[product.id] || [];
                   const primaryImage = mediaList[0];
+                  const currentStock = stockByProductId[product.id] ?? 0;
                   return (
-                    <tr key={product.id} className="align-middle">
+                    <tr
+                      key={product.id}
+                      className="align-middle cursor-pointer transition-colors hover:bg-slate-50"
+                      onClick={() => startEdit(product)}
+                    >
                       <td className="px-3 py-3">
                         <input
                           type="checkbox"
                           checked={selectedProductIds.includes(product.id)}
+                          onClick={(event) => event.stopPropagation()}
                           onChange={(e) => toggleProductSelection(product.id, e.target.checked)}
                           aria-label={`Select ${product.sku}`}
                         />
@@ -1847,7 +2035,10 @@ export default function ProductsPage() {
                             <button
                               type="button"
                               className="absolute right-1 top-1 rounded-full border border-slate-200 bg-white/95 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 shadow-sm"
-                              onClick={() => openImagePreview(mediaList, product.title, primaryImage.storage_path)}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                openImagePreview(mediaList, product.title, primaryImage.storage_path);
+                              }}
                             >
                               View
                             </button>
@@ -1857,29 +2048,8 @@ export default function ProductsPage() {
                         )}
                       </td>
                       <td className="px-3 py-3 font-medium text-slate-900">{product.title}</td>
-                      <td className="px-3 py-3 text-slate-600">{product.sku}</td>
-                      <td className="px-3 py-3 text-slate-600">{getTypeLabel(product.product_type)}</td>
                       <td className="px-3 py-3 text-slate-900">{product.base_price.toFixed(2)}</td>
-                      <td className="px-3 py-3 text-right">
-                        <div className="inline-flex items-center gap-2">
-                          <button
-                            type="button"
-                            className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:border-slate-400"
-                            onClick={() => startEdit(product)}
-                          >
-                            Details
-                          </button>
-                          {product.is_active && (
-                            <button
-                              type="button"
-                              className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
-                              onClick={() => handleSoftDelete(product)}
-                            >
-                              Deactivate
-                            </button>
-                          )}
-                        </div>
-                      </td>
+                      <td className="px-3 py-3 text-slate-700">{currentStock.toFixed(0)}</td>
                     </tr>
                   );
                 })}
@@ -2359,10 +2529,7 @@ export default function ProductsPage() {
                 </p>
               </div>
 
-              <label className="flex items-center gap-2 text-sm text-slate-700">
-                <input checked={isActive} onChange={(e) => setIsActive(e.target.checked)} type="checkbox" />
-                Active
-              </label>
+              <p className="text-xs text-slate-500">Status is automatic: stock &gt; 0 = active, stock = 0 = inactive.</p>
 
               <button
                 className="w-full rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:opacity-60"
@@ -2486,11 +2653,17 @@ export default function ProductsPage() {
                   inputMode="decimal"
                 />
               </div>
-              <div className="flex items-center">
-                <label className="flex items-center gap-2 text-sm text-slate-700">
-                  <input type="checkbox" checked={editActive} onChange={(e) => setEditActive(e.target.checked)} />
-                  Active
-                </label>
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-slate-700">Status</span>
+                <span
+                  className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold ${
+                    (stockByProductId[editingProduct.id] ?? 0) > 0
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                      : "border-slate-300 bg-slate-100 text-slate-600"
+                  }`}
+                >
+                  {(stockByProductId[editingProduct.id] ?? 0) > 0 ? "Active" : "Inactive"}
+                </span>
               </div>
             </div>
 
@@ -2592,21 +2765,86 @@ export default function ProductsPage() {
               </div>
             </div>
 
-            <div className="mt-6 flex justify-end gap-2">
+            <div className="mt-6 flex justify-between gap-2">
+              <button
+                type="button"
+                className="rounded-full border border-rose-200 px-4 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                onClick={handleDeleteEditingProduct}
+                disabled={savingEdit || publishingEdit || deletingEdit}
+              >
+                {deletingEdit ? "Deleting..." : "Delete"}
+              </button>
+              <div className="flex gap-2">
               <button
                 type="button"
                 className="rounded-full border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
                 onClick={cancelEdit}
+                disabled={savingEdit || publishingEdit || deletingEdit}
               >
                 Cancel
               </button>
               <button
                 type="button"
                 className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
-                onClick={handleSaveEdit}
-                disabled={savingEdit}
+                onClick={() => void handleSaveEdit()}
+                disabled={savingEdit || publishingEdit || deletingEdit}
               >
-                {savingEdit ? "Saving..." : "Save changes"}
+                {savingEdit ? "Saving..." : "Save"}
+              </button>
+              <button
+                type="button"
+                className="rounded-full border border-blue-300 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-60"
+                onClick={() => setPublishPreviewModalOpen(true)}
+                disabled={savingEdit || publishingEdit || deletingEdit}
+              >
+                Save and publish
+              </button>
+              </div>
+            </div>
+          </article>
+        </div>
+      )}
+
+      {editingProduct && publishPreviewModalOpen && (
+        <div
+          className="fixed inset-0 z-[72] flex items-center justify-center bg-slate-900/45 p-4"
+          onClick={() => setPublishPreviewModalOpen(false)}
+        >
+          <article
+            className="w-full max-w-md rounded-3xl border border-blue-200 bg-white p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+              Publish Preview
+            </div>
+            <h3 className="mt-3 text-lg font-semibold text-slate-900">Save and publish changes?</h3>
+            <p className="mt-2 text-sm text-slate-600">
+              Product: {editingProduct.sku} - {editingProduct.title}
+            </p>
+            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Updates</p>
+              <ul className="mt-2 space-y-1 text-sm text-slate-700">
+                {getPublishUpdateLabels().map((label) => (
+                  <li key={label}>- {label}</li>
+                ))}
+              </ul>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-full border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
+                onClick={() => setPublishPreviewModalOpen(false)}
+                disabled={publishingEdit}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                onClick={() => void handleSaveAndPublish()}
+                disabled={publishingEdit}
+              >
+                {publishingEdit ? "Publishing..." : "Confirm publish"}
               </button>
             </div>
           </article>
@@ -2674,7 +2912,7 @@ export default function ProductsPage() {
               <div>
                 <h2 className="text-lg font-semibold text-slate-900">Import CSV</h2>
                 <p className="mt-1 text-sm text-slate-500">
-                  Required: sku,title. Optional: product_type, escala, clothing_type, accessory_type, catchy_phrase, is_active.
+                  Required: sku,title. Optional: product_type, escala, clothing_type, accessory_type, catchy_phrase.
                 </p>
               </div>
               <button
