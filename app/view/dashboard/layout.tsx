@@ -42,6 +42,7 @@ export default function DashboardLayout({
     return {
       home: build("/view/dashboard"),
       products: build("/view/dashboard/products"),
+      marketplace: build("/view/dashboard/marketplace"),
       purchases: build("/view/dashboard/purchases"),
       sales: build("/view/dashboard/sales"),
       stock: build("/view/dashboard/stock"),
@@ -129,7 +130,7 @@ export default function DashboardLayout({
             <Link
               href={storeAwareHref.home}
               className={
-                isActivePath("/view/dashboard") && !isActivePath("/view/dashboard/products") && !isActivePath("/view/dashboard/purchases") && !isActivePath("/view/dashboard/sales") && !isActivePath("/view/dashboard/stock") && !isActivePath("/view/dashboard/settings")
+                isActivePath("/view/dashboard") && !isActivePath("/view/dashboard/products") && !isActivePath("/view/dashboard/marketplace") && !isActivePath("/view/dashboard/purchases") && !isActivePath("/view/dashboard/sales") && !isActivePath("/view/dashboard/stock") && !isActivePath("/view/dashboard/settings")
                   ? "rounded-full bg-indigo-100 px-3 py-1 text-xs font-semibold tracking-wide text-indigo-800 shadow-sm ring-1 ring-indigo-200"
                   : "rounded-full bg-indigo-50 px-3 py-1 text-xs font-semibold tracking-wide text-indigo-700 transition hover:bg-indigo-100"
               }
@@ -141,6 +142,12 @@ export default function DashboardLayout({
               className={navItemClass(isActivePath("/view/dashboard/products"))}
             >
               Products
+            </Link>
+            <Link
+              href={storeAwareHref.marketplace}
+              className={navItemClass(isActivePath("/view/dashboard/marketplace"))}
+            >
+              Marketplace
             </Link>
             <Link
               href={storeAwareHref.purchases}

@@ -67,13 +67,42 @@ type ConnectedMarketplaces = {
   etsy: boolean;
 };
 
+type MarketplaceChannel = "woocommerce" | "etsy";
+
+type FingerprintRow = {
+  product_id: string;
+  local_payload_fingerprint: string;
+};
+
+type SnapshotRow = {
+  product_id: string;
+  channel: MarketplaceChannel;
+  sync_state: "published" | "needs_publish" | "unknown" | "error";
+  last_local_payload_fingerprint: string | null;
+  last_error: string | null;
+};
+
+type WarningRow = {
+  product_id: string;
+  channel: MarketplaceChannel;
+  warning_type: string;
+  message: string | null;
+  severity: "info" | "warning" | "critical";
+  is_resolved: boolean;
+};
+
 const PRODUCT_TYPES: ProductType[] = ["ropa", "maquetas", "accesorios"];
+const MARKETPLACE_CHANNELS: MarketplaceChannel[] = ["woocommerce", "etsy"];
 
 function getTypeLabel(type: ProductType | ProductTypeFilter): string {
   if (type === "ropa") return "Apparel";
   if (type === "maquetas") return "Models";
   if (type === "accesorios") return "Accessories";
   return "All";
+}
+
+function marketplaceChannelLabel(channel: MarketplaceChannel): string {
+  return channel === "woocommerce" ? "WooCommerce" : "Etsy";
 }
 
 function getSubtypeLabel(type: ProductTypeFilter): string {
@@ -340,6 +369,10 @@ export default function ProductsPage() {
   const [publishingEdit, setPublishingEdit] = useState(false);
   const [deletingEdit, setDeletingEdit] = useState(false);
   const [connectedMarketplaces, setConnectedMarketplaces] = useState<ConnectedMarketplaces>({ woo: false, etsy: false });
+  const [fingerprintsByProductId, setFingerprintsByProductId] = useState<Record<string, FingerprintRow>>({});
+  const [snapshotsByProductChannel, setSnapshotsByProductChannel] = useState<Record<string, SnapshotRow>>({});
+  const [warningsByProductChannel, setWarningsByProductChannel] = useState<Record<string, WarningRow[]>>({});
+  const [warningDetailsProductId, setWarningDetailsProductId] = useState<string | null>(null);
 
   const [loadingProducts, setLoadingProducts] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -448,6 +481,65 @@ export default function ProductsPage() {
     };
 
     loadProductImages();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedStoreId, supabase]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadMarketplaceSignals = async () => {
+      if (!selectedStoreId) {
+        setFingerprintsByProductId({});
+        setSnapshotsByProductChannel({});
+        setWarningsByProductChannel({});
+        return;
+      }
+
+      const [fingerprintsRes, snapshotsRes, warningsRes] = await Promise.all([
+        supabase
+          .from("product_marketplace_fingerprints")
+          .select("product_id,local_payload_fingerprint")
+          .eq("store_id", selectedStoreId),
+        supabase
+          .from("marketplace_product_snapshots")
+          .select("product_id,channel,sync_state,last_local_payload_fingerprint,last_error")
+          .eq("store_id", selectedStoreId),
+        supabase
+          .from("marketplace_sync_warnings")
+          .select("product_id,channel,warning_type,message,severity,is_resolved")
+          .eq("store_id", selectedStoreId)
+          .eq("is_resolved", false),
+      ]);
+
+      if (cancelled) return;
+      if (fingerprintsRes.error || snapshotsRes.error || warningsRes.error) return;
+
+      const fingerprintMap: Record<string, FingerprintRow> = {};
+      for (const row of (fingerprintsRes.data ?? []) as FingerprintRow[]) {
+        fingerprintMap[row.product_id] = row;
+      }
+
+      const snapshotMap: Record<string, SnapshotRow> = {};
+      for (const row of (snapshotsRes.data ?? []) as SnapshotRow[]) {
+        snapshotMap[`${row.product_id}:${row.channel}`] = row;
+      }
+
+      const warningMap: Record<string, WarningRow[]> = {};
+      for (const row of (warningsRes.data ?? []) as WarningRow[]) {
+        const key = `${row.product_id}:${row.channel}`;
+        if (!warningMap[key]) warningMap[key] = [];
+        warningMap[key].push(row);
+      }
+
+      setFingerprintsByProductId(fingerprintMap);
+      setSnapshotsByProductChannel(snapshotMap);
+      setWarningsByProductChannel(warningMap);
+    };
+
+    void loadMarketplaceSignals();
+
     return () => {
       cancelled = true;
     };
@@ -672,6 +764,44 @@ export default function ProductsPage() {
   );
   const currentMediaList = editingProduct ? productImagesByProductId[editingProduct.id] || [] : [];
   const anyAdvancedWorking = applyingBulkPrices || importingMarketplaceImages || importingMarketplacePrices;
+  const productWarningDetailsById = useMemo(() => {
+    const detailsById: Record<string, string[]> = {};
+
+    for (const product of products) {
+      const localFingerprint = fingerprintsByProductId[product.id]?.local_payload_fingerprint;
+      const lines: string[] = [];
+
+      for (const channel of MARKETPLACE_CHANNELS) {
+        if (channel === "woocommerce" && !connectedMarketplaces.woo) continue;
+        if (channel === "etsy" && !connectedMarketplaces.etsy) continue;
+
+        const snapshot = snapshotsByProductChannel[`${product.id}:${channel}`];
+        const openWarnings = warningsByProductChannel[`${product.id}:${channel}`] || [];
+
+        for (const warning of openWarnings) {
+          const message = warning.message?.trim() || warning.warning_type.replace(/_/g, " ");
+          lines.push(`${marketplaceChannelLabel(channel)}: ${message}`);
+        }
+
+        if (snapshot?.sync_state === "error" && snapshot.last_error) {
+          lines.push(`${marketplaceChannelLabel(channel)}: ${snapshot.last_error}`);
+        }
+
+        if (
+          localFingerprint &&
+          snapshot?.last_local_payload_fingerprint &&
+          localFingerprint !== snapshot.last_local_payload_fingerprint
+        ) {
+          lines.push(`${marketplaceChannelLabel(channel)}: Pending publish (local changes not published yet).`);
+        }
+      }
+
+      if (lines.length > 0) detailsById[product.id] = Array.from(new Set(lines));
+    }
+
+    return detailsById;
+  }, [connectedMarketplaces.etsy, connectedMarketplaces.woo, fingerprintsByProductId, products, snapshotsByProductChannel, warningsByProductChannel]);
+  const warningDetails = warningDetailsProductId ? productWarningDetailsById[warningDetailsProductId] || [] : [];
 
   const getPublicImageUrl = (storagePath: string) => {
     const { data } = supabase.storage.from("product-images").getPublicUrl(storagePath);
@@ -1544,12 +1674,40 @@ export default function ProductsPage() {
     const productIds = [editingProduct.id];
     const pricesOk = await handleSyncPrices(productIds, { showFeedback: false, showSuccessModal: false });
     const picturesOk = await handleSyncPictures(productIds, { showFeedback: false, showSuccessModal: false });
+    let publishMarked = false;
+    if (pricesOk && picturesOk) {
+      const channels: Array<"woocommerce" | "etsy"> = [];
+      if (connectedMarketplaces.woo) channels.push("woocommerce");
+      if (connectedMarketplaces.etsy) channels.push("etsy");
+
+      if (channels.length > 0) {
+        const { data: sessionRes } = await supabase.auth.getSession();
+        const accessToken = sessionRes.session?.access_token;
+        if (accessToken) {
+          const markRes = await fetch("/api/marketplace/publish-mark", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${accessToken}`,
+            },
+            body: JSON.stringify({
+              storeId: selectedStoreId,
+              productIds,
+              channels,
+            }),
+          });
+          publishMarked = markRes.ok;
+        }
+      } else {
+        publishMarked = true;
+      }
+    }
     setPublishingEdit(false);
     setPublishPreviewModalOpen(false);
 
     if (pricesOk && picturesOk) {
       showSuccess("Saved and Published", `Published updates for ${editingProduct.sku} to connected marketplaces.`);
-      setMsg("Product saved and published.");
+      setMsg(publishMarked ? "Product saved and published." : "Product saved and published, but publish metadata could not be recorded.");
       cancelEdit();
       return;
     }
@@ -1970,7 +2128,22 @@ export default function ProductsPage() {
                   <div className="space-y-3 p-4">
                     <div>
                       <p className="text-xs uppercase tracking-wide text-slate-500">{product.sku}</p>
-                      <h3 className="mt-1 line-clamp-2 text-lg font-semibold text-slate-900">{product.title}</h3>
+                      <div className="mt-1 flex items-start justify-between gap-2">
+                        <h3 className="line-clamp-2 text-lg font-semibold text-slate-900">{product.title}</h3>
+                        {productWarningDetailsById[product.id] && (
+                          <button
+                            type="button"
+                            aria-label="View marketplace warning"
+                            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-amber-300 bg-amber-100 text-[11px] font-bold text-amber-700 hover:bg-amber-200"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setWarningDetailsProductId(product.id);
+                            }}
+                          >
+                            !
+                          </button>
+                        )}
+                      </div>
                     </div>
                     <div className="flex items-end justify-between">
                       <div>
@@ -2047,7 +2220,24 @@ export default function ProductsPage() {
                           <div className="h-16 w-16 rounded-lg border border-dashed border-slate-300 bg-slate-50" />
                         )}
                       </td>
-                      <td className="px-3 py-3 font-medium text-slate-900">{product.title}</td>
+                      <td className="px-3 py-3 font-medium text-slate-900">
+                        <div className="flex items-center gap-2">
+                          <span>{product.title}</span>
+                          {productWarningDetailsById[product.id] && (
+                            <button
+                              type="button"
+                              aria-label="View marketplace warning"
+                              className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-amber-300 bg-amber-100 text-[11px] font-bold text-amber-700 hover:bg-amber-200"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setWarningDetailsProductId(product.id);
+                              }}
+                            >
+                              !
+                            </button>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-3 py-3 text-slate-900">{product.base_price.toFixed(2)}</td>
                       <td className="px-3 py-3 text-slate-700">{currentStock.toFixed(0)}</td>
                     </tr>
@@ -2084,6 +2274,37 @@ export default function ProductsPage() {
       </article>
 
       {msg && <p className="text-sm text-slate-600">{msg}</p>}
+
+      {warningDetailsProductId && warningDetails.length > 0 && (
+        <div className="fixed inset-0 z-[68] flex items-center justify-center bg-slate-900/35 p-4" onClick={() => setWarningDetailsProductId(null)}>
+          <article
+            className="w-full max-w-md rounded-3xl border border-amber-200 bg-white p-5 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="inline-flex items-center rounded-full border border-amber-300 bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-800">
+              Warning
+            </div>
+            <h3 className="mt-3 text-base font-semibold text-slate-900">Marketplace differences detected</h3>
+            <p className="mt-1 text-xs text-slate-500">
+              {(products.find((item) => item.id === warningDetailsProductId)?.sku || "").trim()}
+            </p>
+            <ul className="mt-3 space-y-2 text-sm text-slate-700">
+              {warningDetails.map((line) => (
+                <li key={line}>- {line}</li>
+              ))}
+            </ul>
+            <div className="mt-4 flex justify-end">
+              <button
+                type="button"
+                className="rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                onClick={() => setWarningDetailsProductId(null)}
+              >
+                Close
+              </button>
+            </div>
+          </article>
+        </div>
+      )}
 
       {successModal && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/45 p-4" onClick={() => setSuccessModal(null)}>
