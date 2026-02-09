@@ -183,6 +183,15 @@ function parsePriceInput(raw: string): number | null {
   return Math.round(normalized * 100) / 100;
 }
 
+function formatUserWarningMessage(message: string | null, warningType: string): string {
+  const raw = (message || "").trim();
+  const normalized = raw.toLowerCase();
+  if (warningType === "missing_mapping" || normalized.includes("missing etsy listing mapping")) {
+    return "Not published in Etsy yet for this SKU.";
+  }
+  return raw || warningType.replace(/_/g, " ");
+}
+
 function parseCsvProducts(csvText: string): { rows: CsvProduct[]; errors: string[] } {
   const lines = csvText
     .split(/\r?\n/)
@@ -389,10 +398,17 @@ export default function ProductsPage() {
   const statusReconcileInFlightRef = useRef(false);
   const [mediaLoading, setMediaLoading] = useState(false);
   const [mediaUploading, setMediaUploading] = useState(false);
+  const [mediaImportPlatform, setMediaImportPlatform] = useState<BulkImportPlatform>("etsy");
+  const [mediaImportingFromMarketplace, setMediaImportingFromMarketplace] = useState(false);
+  const [isMediaImportPromptOpen, setIsMediaImportPromptOpen] = useState(false);
   const [mediaReordering, setMediaReordering] = useState(false);
   const [draggingImageId, setDraggingImageId] = useState<string | null>(null);
   const [dragOverImageId, setDragOverImageId] = useState<string | null>(null);
   const [mediaMsg, setMediaMsg] = useState("");
+  const [priceImportPlatform, setPriceImportPlatform] = useState<BulkImportPlatform>("etsy");
+  const [priceImportingFromMarketplace, setPriceImportingFromMarketplace] = useState(false);
+  const [isPriceImportPromptOpen, setIsPriceImportPromptOpen] = useState(false);
+  const [priceImportMsg, setPriceImportMsg] = useState("");
 
   useEffect(() => {
     setSelectedStoreId(searchParams.get("store") || "");
@@ -779,7 +795,7 @@ export default function ProductsPage() {
         const openWarnings = warningsByProductChannel[`${product.id}:${channel}`] || [];
 
         for (const warning of openWarnings) {
-          const message = warning.message?.trim() || warning.warning_type.replace(/_/g, " ");
+          const message = formatUserWarningMessage(warning.message, warning.warning_type);
           lines.push(`${marketplaceChannelLabel(channel)}: ${message}`);
         }
 
@@ -1861,6 +1877,148 @@ export default function ProductsPage() {
     setMediaMsg("Image order updated.");
   };
 
+  const handleImportPriceFromMarketplace = async () => {
+    if (!editingProduct || !selectedStoreId) return;
+    if (priceImportPlatform === "woocommerce" && !connectedMarketplaces.woo) {
+      setPriceImportMsg("WooCommerce is not connected for this store.");
+      return;
+    }
+    if (priceImportPlatform === "etsy" && !connectedMarketplaces.etsy) {
+      setPriceImportMsg("Etsy is not connected for this store.");
+      return;
+    }
+
+    setPriceImportingFromMarketplace(true);
+    setIsPriceImportPromptOpen(false);
+    setPriceImportMsg("");
+    try {
+      const { data: sessionRes } = await supabase.auth.getSession();
+      const accessToken = sessionRes.session?.access_token;
+      if (!accessToken) {
+        setPriceImportMsg("Not authenticated.");
+        return;
+      }
+
+      const res = await fetch("/api/products/import-marketplace-prices", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          storeId: selectedStoreId,
+          productIds: [editingProduct.id],
+          platform: priceImportPlatform,
+          updateBasePrice: false,
+        }),
+      });
+      const payload = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        updatedProducts?: number;
+        updatedWooProducts?: number;
+        updatedEtsyProducts?: number;
+        missingSkuCount?: number;
+        missingPriceCount?: number;
+        errors?: string[];
+      };
+
+      if (!res.ok) {
+        setPriceImportMsg(payload.error || "Marketplace price import failed.");
+        return;
+      }
+
+      const { data: refreshedRow, error: refreshError } = await supabase
+        .from("products")
+        .select("id,store_id,sku,name,title,product_type,escala,clothing_type,accessory_type,catchy_phrase,base_price,woo_price,etsy_price,is_active,created_at")
+        .eq("store_id", selectedStoreId)
+        .eq("id", editingProduct.id)
+        .single();
+
+      if (!refreshError && refreshedRow) {
+        const normalized = normalizeProductRow(refreshedRow as ProductRow);
+        setProducts((prev) => prev.map((item) => (item.id === editingProduct.id ? normalized : item)));
+        setEditBasePrice(String(normalized.base_price ?? ""));
+        setEditWooPrice(normalized.woo_price == null ? "" : String(normalized.woo_price));
+        setEditEtsyPrice(normalized.etsy_price == null ? "" : String(normalized.etsy_price));
+      }
+
+      const firstError = payload.errors?.[0] ? ` First issue: ${payload.errors[0]}` : "";
+      setPriceImportMsg(
+        `Prices imported from ${priceImportPlatform}. Updated: ${payload.updatedProducts || 0}. Woo updated: ${payload.updatedWooProducts || 0}. Etsy updated: ${payload.updatedEtsyProducts || 0}. Missing SKU: ${payload.missingSkuCount || 0}. Missing price: ${payload.missingPriceCount || 0}.${firstError}`,
+      );
+    } catch (error) {
+      setPriceImportMsg(error instanceof Error ? error.message : "Marketplace price import failed.");
+    } finally {
+      setPriceImportingFromMarketplace(false);
+    }
+  };
+
+  const handleImportMediaFromMarketplace = async () => {
+    if (!editingProduct || !selectedStoreId) return;
+    if (mediaImportPlatform === "woocommerce" && !connectedMarketplaces.woo) {
+      setMediaMsg("WooCommerce is not connected for this store.");
+      return;
+    }
+    if (mediaImportPlatform === "etsy" && !connectedMarketplaces.etsy) {
+      setMediaMsg("Etsy is not connected for this store.");
+      return;
+    }
+
+    setMediaImportingFromMarketplace(true);
+    setIsMediaImportPromptOpen(false);
+    setMediaMsg("");
+    try {
+      const { data: sessionRes } = await supabase.auth.getSession();
+      const accessToken = sessionRes.session?.access_token;
+      if (!accessToken) {
+        setMediaMsg("Not authenticated.");
+        return;
+      }
+
+      const res = await fetch("/api/products/import-marketplace-images", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          storeId: selectedStoreId,
+          productIds: [editingProduct.id],
+          platform: mediaImportPlatform,
+          fallbackPlatform: null,
+        }),
+      });
+      const payload = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        importedProducts?: number;
+        totalImagesImported?: number;
+        missingSkuCount?: number;
+        missingImageCount?: number;
+        errors?: string[];
+      };
+
+      if (!res.ok) {
+        setMediaMsg(payload.error || "Marketplace image import failed.");
+        return;
+      }
+
+      await refreshProductImages();
+      const firstError = payload.errors?.[0] ? ` First issue: ${payload.errors[0]}` : "";
+      const imported = payload.totalImagesImported || 0;
+      if (imported > 0) {
+        setMediaMsg(`Imported ${imported} image(s) from ${mediaImportPlatform}.${firstError}`);
+      } else {
+        setMediaMsg(
+          `No images imported from ${mediaImportPlatform}. Missing SKU map: ${payload.missingSkuCount || 0}. Missing images: ${payload.missingImageCount || 0}.${firstError}`,
+        );
+      }
+    } catch (error) {
+      setMediaMsg(error instanceof Error ? error.message : "Marketplace image import failed.");
+    } finally {
+      setMediaImportingFromMarketplace(false);
+    }
+  };
+
   return (
     <section className="space-y-6">
       <header className="relative overflow-hidden rounded-[28px] border border-slate-300 bg-gradient-to-br from-slate-100 via-white to-blue-100 p-6 shadow-sm">
@@ -2874,6 +3032,51 @@ export default function ProductsPage() {
                   inputMode="decimal"
                 />
               </div>
+              <div className="md:col-span-2">
+                <div className="flex flex-wrap items-end gap-2">
+                  <button
+                    type="button"
+                    className="rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-400 disabled:opacity-60"
+                    onClick={() => setIsPriceImportPromptOpen(true)}
+                    disabled={priceImportingFromMarketplace}
+                  >
+                    {priceImportingFromMarketplace ? "Importing..." : "Import prices from marketplace"}
+                  </button>
+                </div>
+                {isPriceImportPromptOpen && (
+                  <div className="mt-3 rounded-xl border border-slate-200 bg-white p-3">
+                    <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Marketplace</label>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <select
+                        className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+                        value={priceImportPlatform}
+                        onChange={(e) => setPriceImportPlatform(e.target.value as BulkImportPlatform)}
+                        disabled={priceImportingFromMarketplace}
+                      >
+                        <option value="etsy">Etsy</option>
+                        <option value="woocommerce">WooCommerce</option>
+                      </select>
+                      <button
+                        type="button"
+                        className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-slate-400 disabled:opacity-60"
+                        onClick={() => setIsPriceImportPromptOpen(false)}
+                        disabled={priceImportingFromMarketplace}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-full bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60"
+                        onClick={handleImportPriceFromMarketplace}
+                        disabled={priceImportingFromMarketplace}
+                      >
+                        OK
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {priceImportMsg && <p className="mt-2 text-xs text-slate-600">{priceImportMsg}</p>}
+              </div>
               <div className="flex items-center gap-2">
                 <span className="text-sm font-medium text-slate-700">Status</span>
                 <span
@@ -2893,6 +3096,48 @@ export default function ProductsPage() {
                 <h3 className="text-sm font-semibold text-slate-900">Media</h3>
                 <p className="text-xs text-slate-500">{currentMediaList.length} image(s)</p>
               </div>
+              <div className="mt-3 flex flex-wrap items-end gap-2">
+                <button
+                  type="button"
+                  className="rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-400 disabled:opacity-60"
+                  onClick={() => setIsMediaImportPromptOpen(true)}
+                  disabled={mediaUploading || mediaReordering || mediaImportingFromMarketplace}
+                >
+                  {mediaImportingFromMarketplace ? "Importing..." : "Import from marketplace"}
+                </button>
+              </div>
+              {isMediaImportPromptOpen && (
+                <div className="mt-3 rounded-xl border border-slate-200 bg-white p-3">
+                  <label className="text-xs font-medium uppercase tracking-wide text-slate-500">Marketplace</label>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <select
+                      className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+                      value={mediaImportPlatform}
+                      onChange={(e) => setMediaImportPlatform(e.target.value as BulkImportPlatform)}
+                      disabled={mediaImportingFromMarketplace}
+                    >
+                      <option value="etsy">Etsy</option>
+                      <option value="woocommerce">WooCommerce</option>
+                    </select>
+                    <button
+                      type="button"
+                      className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-slate-400 disabled:opacity-60"
+                      onClick={() => setIsMediaImportPromptOpen(false)}
+                      disabled={mediaImportingFromMarketplace}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-full bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60"
+                      onClick={handleImportMediaFromMarketplace}
+                      disabled={mediaImportingFromMarketplace}
+                    >
+                      OK
+                    </button>
+                  </div>
+                </div>
+              )}
               <input
                 className="mt-3 block w-full text-sm text-slate-700 file:mr-3 file:rounded-full file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-slate-800"
                 type="file"

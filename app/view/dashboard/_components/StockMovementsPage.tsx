@@ -56,6 +56,11 @@ const CACHE_VERSION = "v1";
 const MOVEMENT_ROWS_CACHE_PREFIX = `stock_movements_rows_${CACHE_VERSION}`;
 const PRODUCTS_META_CACHE_PREFIX = `stock_products_meta_${CACHE_VERSION}`;
 const ACTIVE_PRODUCTS_CACHE_PREFIX = `stock_active_products_${CACHE_VERSION}`;
+const ETSY_OAUTH_STATE_KEY = "etsy_oauth_state";
+const ETSY_OAUTH_STORE_ID_KEY = "etsy_oauth_store_id";
+const ETSY_OAUTH_CODE_VERIFIER_KEY = "etsy_oauth_code_verifier";
+const ETSY_OAUTH_REDIRECT_URI_KEY = "etsy_oauth_redirect_uri";
+const ETSY_OAUTH_DONE_KEY = "etsy_oauth_done";
 
 function readCache<T>(key: string): T | null {
   if (typeof window === "undefined") return null;
@@ -131,6 +136,31 @@ function escapeCsvValue(value: string | number | boolean | null | undefined): st
 
 function compareText(a: string, b: string): number {
   return a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
+}
+
+function toBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  bytes.forEach((value) => {
+    binary += String.fromCharCode(value);
+  });
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function randomVerifier(length = 64): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
+  let output = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    output += alphabet[bytes[i] % alphabet.length];
+  }
+  return output;
+}
+
+async function pkceChallenge(verifier: string): Promise<string> {
+  const data = new TextEncoder().encode(verifier);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return toBase64Url(new Uint8Array(digest));
 }
 
 function toIsoDate(value: Date): string {
@@ -294,6 +324,9 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
   const [savingEdit, setSavingEdit] = useState(false);
   const [bulkWorking, setBulkWorking] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [syncingMarketplaceSales, setSyncingMarketplaceSales] = useState(false);
+  const [reconnectingEtsy, setReconnectingEtsy] = useState(false);
+  const [needsEtsyReconnect, setNeedsEtsyReconnect] = useState(false);
   const [msg, setMsg] = useState("");
   const [csvErrors, setCsvErrors] = useState<string[]>([]);
 
@@ -313,6 +346,23 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
   useEffect(() => {
     setSelectedStoreId(searchParams.get("store") || "");
   }, [searchParams]);
+
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== ETSY_OAUTH_DONE_KEY || !event.newValue) return;
+      try {
+        const payload = JSON.parse(event.newValue) as { storeId?: string };
+        if (payload.storeId && payload.storeId === selectedStoreId) {
+          setNeedsEtsyReconnect(false);
+          setMsg("Etsy reconnected. Click Sync marketplace sales again.");
+        }
+      } catch {
+        // Ignore malformed events.
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [selectedStoreId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -782,6 +832,163 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
     setIsImportModalOpen(false);
   };
 
+  const startEtsyReconnectFromSales = async (prefaceMessage = true) => {
+    if (prefaceMessage) setMsg("");
+    if (!selectedStoreId) {
+      setMsg("Select a store first.");
+      return false;
+    }
+    const { data: sessionRes } = await supabase.auth.getSession();
+    const accessToken = sessionRes.session?.access_token || "";
+    if (!accessToken) {
+      setMsg("Session expired. Please sign in again.");
+      return false;
+    }
+
+    setReconnectingEtsy(true);
+    try {
+      const configRes = await fetch(`/api/integrations/config?storeId=${encodeURIComponent(selectedStoreId)}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const configPayload = (await configRes.json().catch(() => ({}))) as {
+        error?: string;
+        config?: { etsyKeystring?: string };
+      };
+      if (!configRes.ok) {
+        setMsg(configPayload.error || "Failed to load Etsy configuration.");
+        return false;
+      }
+
+      const clientId = (configPayload.config?.etsyKeystring || "").trim();
+      if (!clientId) {
+        setMsg("Etsy keystring is missing. Add it once in Settings, then reconnect from here.");
+        return false;
+      }
+
+      const redirectUri = `${window.location.origin}/view/dashboard/settings/etsy/callback`;
+      const verifier = randomVerifier(96);
+      const challenge = await pkceChallenge(verifier);
+      const state = crypto.randomUUID();
+
+      window.localStorage.setItem(ETSY_OAUTH_STATE_KEY, state);
+      window.localStorage.setItem(ETSY_OAUTH_STORE_ID_KEY, selectedStoreId);
+      window.localStorage.setItem(ETSY_OAUTH_CODE_VERIFIER_KEY, verifier);
+      window.localStorage.setItem(ETSY_OAUTH_REDIRECT_URI_KEY, redirectUri);
+
+      const scope = "shops_r shops_w listings_r listings_w transactions_r";
+      const authorizeUrl = new URL("https://www.etsy.com/oauth/connect");
+      authorizeUrl.searchParams.set("response_type", "code");
+      authorizeUrl.searchParams.set("client_id", clientId);
+      authorizeUrl.searchParams.set("redirect_uri", redirectUri);
+      authorizeUrl.searchParams.set("scope", scope);
+      authorizeUrl.searchParams.set("state", state);
+      authorizeUrl.searchParams.set("code_challenge", challenge);
+      authorizeUrl.searchParams.set("code_challenge_method", "S256");
+
+      const popup = window.open(authorizeUrl.toString(), "_blank", "noopener,noreferrer");
+      if (!popup) {
+        setMsg("Popup blocked. Please allow popups and try again.");
+        return false;
+      }
+
+      setMsg("Etsy reconnect opened in a new tab. Complete it, then click Sync marketplace sales again.");
+      return true;
+    } catch (error) {
+      setMsg(error instanceof Error ? error.message : "Failed to reconnect Etsy.");
+      return false;
+    } finally {
+      setReconnectingEtsy(false);
+    }
+  };
+
+  const handleReconnectEtsyFromSales = async () => {
+    await startEtsyReconnectFromSales();
+  };
+
+  const handleSyncMarketplaceSales = async () => {
+    setMsg("");
+    setCsvErrors([]);
+    if (movementType !== "sale") return;
+    if (!selectedStoreId) {
+      setMsg("Select a store.");
+      return;
+    }
+
+    const { data: sessionData } = await supabase.auth.getSession();
+    const accessToken = sessionData.session?.access_token || "";
+    if (!accessToken) {
+      setMsg("Session expired. Please log in again.");
+      return;
+    }
+
+    setSyncingMarketplaceSales(true);
+    try {
+      const response = await fetch("/api/sales/sync-marketplaces", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ storeId: selectedStoreId }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        inserted?: number;
+        deduped?: number;
+        skippedMissingSku?: number;
+        skippedUnknownLocalProduct?: number;
+        woo?: { orders?: number };
+        etsy?: { receipts?: number };
+        errors?: string[];
+      };
+
+      if (!response.ok) {
+        const errorText = (payload.error || "").toLowerCase();
+        if (errorText.includes("requires scope: transactions_r")) {
+          setNeedsEtsyReconnect(true);
+          const opened = await startEtsyReconnectFromSales(false);
+          if (!opened) {
+            setMsg("Etsy sales permission is missing. Click Reconnect Etsy and then sync again.");
+          }
+          return;
+        }
+        setMsg(payload.error || "Marketplace sales sync failed.");
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("stock_movements")
+        .select("id,store_id,product_id,movement_type,quantity,unit_price,channel,occurred_on,created_at")
+        .eq("store_id", selectedStoreId)
+        .eq("movement_type", movementType)
+        .order("occurred_on", { ascending: false })
+        .order("created_at", { ascending: false });
+
+      if (error) {
+        setMsg(`Sales synced but refresh failed: ${error.message}`);
+        return;
+      }
+
+      persistRows(hydrateRowsWithProducts((data ?? []) as MovementDbRow[]));
+      const firstError = Array.isArray(payload.errors) && payload.errors.length > 0 ? ` First issue: ${payload.errors[0]}` : "";
+      const hasEtsyScopeIssue = Array.isArray(payload.errors)
+        ? payload.errors.some((entry) => (entry || "").toLowerCase().includes("requires scope: transactions_r"))
+        : false;
+      setNeedsEtsyReconnect(hasEtsyScopeIssue);
+      if (hasEtsyScopeIssue) {
+        await startEtsyReconnectFromSales(false);
+      } else {
+        setMsg(
+          `Sales synced. Added ${payload.inserted || 0}, skipped duplicates ${payload.deduped || 0}, missing SKU ${payload.skippedMissingSku || 0}, unknown local products ${payload.skippedUnknownLocalProduct || 0}. Woo orders: ${payload.woo?.orders || 0}. Etsy receipts: ${payload.etsy?.receipts || 0}.${firstError}`,
+        );
+      }
+    } catch (error) {
+      setMsg(error instanceof Error ? error.message : "Marketplace sales sync failed.");
+    } finally {
+      setSyncingMarketplaceSales(false);
+    }
+  };
+
   const toggleRowSelection = (rowId: string, checked: boolean) => {
     setSelectedRowIds((prev) => {
       if (checked) return prev.includes(rowId) ? prev : [...prev, rowId];
@@ -915,6 +1122,26 @@ export default function StockMovementsPage(props: StockMovementsPageProps) {
             >
               Add new record
             </button>
+            {movementType === "sale" && (
+              <button
+                type="button"
+                className="rounded-full border border-slate-300 bg-white px-5 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-400 disabled:opacity-60"
+                onClick={handleSyncMarketplaceSales}
+                disabled={!selectedStoreId || syncingMarketplaceSales}
+              >
+                {syncingMarketplaceSales ? "Syncing..." : "Sync marketplace sales"}
+              </button>
+            )}
+            {movementType === "sale" && needsEtsyReconnect && (
+              <button
+                type="button"
+                className="rounded-full border border-amber-300 bg-amber-50 px-5 py-2 text-sm font-semibold text-amber-800 shadow-sm transition hover:border-amber-400 disabled:opacity-60"
+                onClick={handleReconnectEtsyFromSales}
+                disabled={!selectedStoreId || reconnectingEtsy}
+              >
+                {reconnectingEtsy ? "Opening Etsy..." : "Reconnect Etsy"}
+              </button>
+            )}
             <button
               type="button"
               className="rounded-full border border-slate-300 bg-white px-5 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-400 disabled:opacity-60"

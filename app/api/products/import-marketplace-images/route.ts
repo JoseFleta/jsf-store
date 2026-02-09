@@ -67,6 +67,65 @@ function safeJsonParse<T>(raw: string, fallback: T): T {
   }
 }
 
+function formatUnknownError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+
+  const parts: string[] = [];
+  if (error.message) parts.push(error.message);
+
+  const cause = (error as Error & { cause?: unknown }).cause;
+  if (cause && typeof cause === "object") {
+    const causeObj = cause as { code?: unknown; errno?: unknown; message?: unknown };
+    const causeBits: string[] = [];
+    if (typeof causeObj.code === "string" && causeObj.code.trim()) causeBits.push(causeObj.code.trim());
+    if (typeof causeObj.errno === "number") causeBits.push(`errno ${causeObj.errno}`);
+    if (typeof causeObj.message === "string" && causeObj.message.trim()) causeBits.push(causeObj.message.trim());
+    if (causeBits.length > 0) parts.push(causeBits.join(" | "));
+  } else if (typeof cause === "string" && cause.trim()) {
+    parts.push(cause.trim());
+  }
+
+  return parts.filter(Boolean).join(" :: ") || "Unknown error";
+}
+
+function isDnsLookupError(error: unknown): boolean {
+  const normalized = formatUnknownError(error).toLowerCase();
+  return normalized.includes("enotfound") || normalized.includes("eai_again") || normalized.includes("getaddrinfo");
+}
+
+function toggleWwwHost(rawUrl: string): string | null {
+  try {
+    const url = new URL(rawUrl);
+    if (url.hostname.toLowerCase().startsWith("www.")) {
+      url.hostname = url.hostname.slice(4);
+      return url.toString();
+    }
+    url.hostname = `www.${url.hostname}`;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+async function fetchWithDnsFallback(url: string): Promise<Response> {
+  try {
+    return await fetch(url, { method: "GET", cache: "no-store" });
+  } catch (primaryError) {
+    if (!isDnsLookupError(primaryError)) {
+      throw new Error(`Network request failed: ${formatUnknownError(primaryError)}`);
+    }
+    const fallbackUrl = toggleWwwHost(url);
+    if (!fallbackUrl) {
+      throw new Error(`DNS resolution failed: ${formatUnknownError(primaryError)}`);
+    }
+    try {
+      return await fetch(fallbackUrl, { method: "GET", cache: "no-store" });
+    } catch (fallbackError) {
+      throw new Error(`DNS resolution failed (${formatUnknownError(primaryError)}; fallback failed: ${formatUnknownError(fallbackError)})`);
+    }
+  }
+}
+
 function isInvalidTokenMessage(message: string): boolean {
   const normalized = message.toLowerCase();
   return normalized.includes("401") && normalized.includes("invalid_token");
@@ -139,14 +198,14 @@ function buildWooUrl(config: ResolvedWooConfig, path: string, search?: Record<st
 
 async function findWooProductsBySku(config: ResolvedWooConfig, sku: string): Promise<WooProduct[]> {
   const exactUrl = buildWooUrl(config, "/products", { sku, per_page: "100" });
-  const exactRes = await fetch(exactUrl, { method: "GET", cache: "no-store" });
+  const exactRes = await fetchWithDnsFallback(exactUrl);
   if (!exactRes.ok) throw new Error(`Woo lookup failed for ${sku}: ${await parseErrorBody(exactRes)}`);
   const exactData = (await exactRes.json()) as WooProduct[];
   const exactMatches = (exactData || []).filter((p) => normalizeSku(p.sku) === sku);
   if (exactMatches.length > 0) return exactMatches;
 
   const searchUrl = buildWooUrl(config, "/products", { search: sku, per_page: "100" });
-  const searchRes = await fetch(searchUrl, { method: "GET", cache: "no-store" });
+  const searchRes = await fetchWithDnsFallback(searchUrl);
   if (!searchRes.ok) throw new Error(`Woo search failed for ${sku}: ${await parseErrorBody(searchRes)}`);
   const searchData = (await searchRes.json()) as WooProduct[];
   return (searchData || []).filter((p) => normalizeSku(p.sku) === sku);
@@ -312,7 +371,7 @@ async function fetchEtsyListingImageUrlsWithRefresh(
 }
 
 async function fetchImageBytes(url: string): Promise<{ bytes: Buffer; contentType: string | null }> {
-  const res = await fetch(url, { method: "GET", cache: "no-store" });
+  const res = await fetchWithDnsFallback(url);
   if (!res.ok) throw new Error(`Image download failed: ${await parseErrorBody(res)}`);
   const contentType = res.headers.get("content-type");
   const bytes = Buffer.from(await res.arrayBuffer());

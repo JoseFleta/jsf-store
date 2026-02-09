@@ -335,11 +335,17 @@ export default function StockPage() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${accessToken}`,
         },
-        body: JSON.stringify({ storeId: selectedStoreId, skus }),
+        body: JSON.stringify({
+          storeId: selectedStoreId,
+          skus,
+          syncOnlyMismatches: !(skus && skus.length > 0),
+        }),
       });
 
       const payload = (await res.json().catch(() => ({}))) as {
         error?: string;
+        syncMode?: "selected" | "mismatches" | "all";
+        mismatchSkuCount?: number;
         syncedSkuCount?: number;
         requestedSkuCount?: number | null;
         skippedRequestedSkuCount?: number;
@@ -374,7 +380,9 @@ export default function StockPage() {
       const firstError =
         payload.errors?.[0] || payload.woo?.errors?.[0] || payload.etsy?.errors?.[0] || "";
       const scopeSummary =
-        payload.requestedSkuCount && payload.requestedSkuCount > 0
+        payload.syncMode === "mismatches"
+          ? `Scope: ${payload.syncedSkuCount || 0} mismatched SKU(s) (${payload.mismatchSkuCount || 0} detected)`
+          : payload.requestedSkuCount && payload.requestedSkuCount > 0
           ? `Scope: ${payload.syncedSkuCount || 0}/${payload.requestedSkuCount} selected SKU(s)`
           : `Scope: ${payload.syncedSkuCount || 0} SKU(s)`;
       const skippedSummary =
@@ -495,7 +503,7 @@ export default function StockPage() {
             onClick={() => handleSyncMarketplaces()}
             disabled={!selectedStoreId || loading || syncingMarketplaces}
           >
-            {syncingMarketplaces ? "Syncing..." : "Sync all"}
+            {syncingMarketplaces ? "Syncing..." : "Sync mismatches"}
           </button>
           <button
             type="button"

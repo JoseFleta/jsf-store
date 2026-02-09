@@ -57,6 +57,13 @@ type EtsyRefreshResponse = {
   expires_in?: number;
 };
 
+type SnapshotRow = {
+  product_id: string;
+  channel: "woocommerce" | "etsy";
+  stock_qty: number | null;
+  status: string | null;
+};
+
 function normalizeSku(raw: string | null | undefined): string {
   return (raw || "").trim().toUpperCase();
 }
@@ -173,6 +180,61 @@ function safeJsonParse<T>(raw: string, fallback: T): T {
   }
 }
 
+function formatUnknownError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+
+  const parts: string[] = [];
+  if (error.message) parts.push(error.message);
+
+  const cause = (error as Error & { cause?: unknown }).cause;
+  if (cause && typeof cause === "object") {
+    const causeObj = cause as { code?: unknown; errno?: unknown; message?: unknown };
+    const causeBits: string[] = [];
+    if (typeof causeObj.code === "string" && causeObj.code.trim()) causeBits.push(causeObj.code.trim());
+    if (typeof causeObj.errno === "number") causeBits.push(`errno ${causeObj.errno}`);
+    if (typeof causeObj.message === "string" && causeObj.message.trim()) causeBits.push(causeObj.message.trim());
+    if (causeBits.length > 0) parts.push(causeBits.join(" | "));
+  } else if (typeof cause === "string" && cause.trim()) {
+    parts.push(cause.trim());
+  }
+
+  return parts.filter(Boolean).join(" :: ") || "Unknown error";
+}
+
+function isDnsLookupError(error: unknown): boolean {
+  const normalized = formatUnknownError(error).toLowerCase();
+  return normalized.includes("enotfound") || normalized.includes("eai_again") || normalized.includes("getaddrinfo");
+}
+
+function toggleWwwHost(rawUrl: string): string | null {
+  try {
+    const url = new URL(rawUrl);
+    if (url.hostname.toLowerCase().startsWith("www.")) {
+      url.hostname = url.hostname.slice(4);
+      return url.toString();
+    }
+    url.hostname = `www.${url.hostname}`;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+async function fetchWooWithFallback(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, { cache: "no-store", ...(init || {}) });
+  } catch (primaryError) {
+    if (!isDnsLookupError(primaryError)) throw primaryError;
+    const fallbackUrl = toggleWwwHost(url);
+    if (!fallbackUrl) throw primaryError;
+    try {
+      return await fetch(fallbackUrl, { cache: "no-store", ...(init || {}) });
+    } catch (fallbackError) {
+      throw new Error(`DNS resolution failed for Woo URL (${formatUnknownError(primaryError)}; fallback failed: ${formatUnknownError(fallbackError)})`);
+    }
+  }
+}
+
 async function parseErrorBody(res: Response): Promise<string> {
   const text = await res.text();
   if (!text) return `${res.status} ${res.statusText}`;
@@ -219,7 +281,7 @@ function buildWooUrl(config: ResolvedWooConfig, path: string, search?: Record<st
 
 async function findWooProductsBySku(config: ResolvedWooConfig, sku: string): Promise<WooProduct[]> {
   const exactUrl = buildWooUrl(config, "/products", { sku, per_page: "100" });
-  const exactRes = await fetch(exactUrl, { method: "GET", cache: "no-store" });
+  const exactRes = await fetchWooWithFallback(exactUrl, { method: "GET" });
   if (!exactRes.ok) {
     throw new Error(`Woo lookup failed for ${sku}: ${await parseErrorBody(exactRes)}`);
   }
@@ -228,7 +290,7 @@ async function findWooProductsBySku(config: ResolvedWooConfig, sku: string): Pro
   if (exactMatches.length > 0) return exactMatches;
 
   const searchUrl = buildWooUrl(config, "/products", { search: sku, per_page: "100" });
-  const searchRes = await fetch(searchUrl, { method: "GET", cache: "no-store" });
+  const searchRes = await fetchWooWithFallback(searchUrl, { method: "GET" });
   if (!searchRes.ok) {
     throw new Error(`Woo search failed for ${sku}: ${await parseErrorBody(searchRes)}`);
   }
@@ -265,7 +327,7 @@ async function syncWooStock(config: ResolvedWooConfig | null, rowsBySku: Map<str
 
       for (const product of products) {
         const updateUrl = buildWooUrl(config, `/products/${product.id}`);
-        const updateRes = await fetch(updateUrl, {
+        const updateRes = await fetchWooWithFallback(updateUrl, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -305,6 +367,11 @@ function resolveEtsyConfig(integration: StoreIntegrationRow | null): ResolvedEts
     skuMap.set(normalizeSku(sku), entry || {});
   }
   return { bearer, refreshToken, tokenExpiresAt, apiKey, shopName, skuMap };
+}
+
+function shouldIgnoreStockMismatch(channel: string, status: string | null, localStockQty: number): boolean {
+  const normalizedStatus = (status || "").trim().toLowerCase();
+  return channel === "etsy" && localStockQty <= 0 && normalizedStatus.length > 0 && normalizedStatus !== "active";
 }
 
 async function refreshEtsyAccessToken(config: ResolvedEtsyConfig): Promise<EtsyRefreshResponse> {
@@ -541,7 +608,7 @@ export async function POST(req: Request) {
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
   if (!token) return NextResponse.json({ error: "Missing bearer token" }, { status: 401 });
 
-  const body = (await req.json().catch(() => ({}))) as { storeId?: string; skus?: string[] };
+  const body = (await req.json().catch(() => ({}))) as { storeId?: string; skus?: string[]; syncOnlyMismatches?: boolean };
   const storeId = (body.storeId || "").trim();
   if (!storeId) return NextResponse.json({ error: "Missing storeId" }, { status: 400 });
 
@@ -558,7 +625,7 @@ export async function POST(req: Request) {
     .maybeSingle();
   if (memErr || !membership) return NextResponse.json({ error: "Store access denied" }, { status: 403 });
 
-  const [productsRes, movementsRes, integrationsRes] = await Promise.all([
+  const [productsRes, movementsRes, integrationsRes, snapshotsRes] = await Promise.all([
     supabaseAdmin.from("products").select("id,sku,is_active").eq("store_id", storeId),
     supabaseAdmin.from("stock_movements").select("product_id,movement_type,quantity,qty_change").eq("store_id", storeId),
     supabaseAdmin
@@ -566,10 +633,16 @@ export async function POST(req: Request) {
       .select("woo_url,woo_key,woo_secret,etsy_bearer,etsy_refresh_token,etsy_token_expires_at,etsy_keystring,etsy_shop_name,etsy_skumap_json")
       .eq("store_id", storeId)
       .maybeSingle(),
+    supabaseAdmin
+      .from("marketplace_product_snapshots")
+      .select("product_id,channel,stock_qty,status")
+      .eq("store_id", storeId)
+      .in("channel", ["woocommerce", "etsy"]),
   ]);
 
   if (productsRes.error) return NextResponse.json({ error: productsRes.error.message }, { status: 400 });
   if (movementsRes.error) return NextResponse.json({ error: movementsRes.error.message }, { status: 400 });
+  if (snapshotsRes.error) return NextResponse.json({ error: snapshotsRes.error.message }, { status: 400 });
 
   const integrationRow = integrationsRes.error ? null : ((integrationsRes.data ?? null) as StoreIntegrationRow | null);
   const integrationReadError = integrationsRes.error?.message
@@ -580,6 +653,8 @@ export async function POST(req: Request) {
 
   const products = (productsRes.data ?? []) as ProductRow[];
   const movements = (movementsRes.data ?? []) as StockMovementRow[];
+  const snapshots = (snapshotsRes.data ?? []) as SnapshotRow[];
+  const productById = new Map(products.map((product) => [product.id, product]));
 
   const stockByProductId = new Map<string, number>();
   for (const mv of movements) {
@@ -605,6 +680,20 @@ export async function POST(req: Request) {
   const requestedSkuSet = new Set(
     Array.isArray(body.skus) ? body.skus.map((sku) => normalizeSku(sku)).filter((sku) => sku.length > 0) : [],
   );
+  const syncOnlyMismatches = body.syncOnlyMismatches !== false;
+  const mismatchSkuSet = new Set<string>();
+  for (const snapshot of snapshots) {
+    const product = productById.get(snapshot.product_id);
+    if (!product) continue;
+    const sku = normalizeSku(product.sku);
+    if (!sku) continue;
+    if (snapshot.stock_qty == null || !Number.isFinite(Number(snapshot.stock_qty))) continue;
+    const localStockQty = toIntegerStock(stockByProductId.get(snapshot.product_id) || 0);
+    const marketplaceQty = toIntegerStock(Number(snapshot.stock_qty));
+    if (localStockQty === marketplaceQty) continue;
+    if (shouldIgnoreStockMismatch(snapshot.channel, snapshot.status, localStockQty)) continue;
+    mismatchSkuSet.add(sku);
+  }
 
   const stockBySkuToSync = new Map<string, SyncSkuRow>();
   const skippedRequestedSkus: string[] = [];
@@ -617,10 +706,13 @@ export async function POST(req: Request) {
       }
       stockBySkuToSync.set(sku, stockBySku.get(sku)!);
     }
-  } else {
-    for (const [sku, qty] of stockBySku.entries()) {
-      stockBySkuToSync.set(sku, qty);
+  } else if (syncOnlyMismatches) {
+    for (const sku of mismatchSkuSet) {
+      const row = stockBySku.get(sku);
+      if (row) stockBySkuToSync.set(sku, row);
     }
+  } else {
+    for (const [sku, qty] of stockBySku.entries()) stockBySkuToSync.set(sku, qty);
   }
 
   const wooConfig = resolveWooConfig(integrationRow);
@@ -655,6 +747,8 @@ export async function POST(req: Request) {
 
   return NextResponse.json({
     ok: true,
+    syncMode: requestedSkuSet.size > 0 ? "selected" : syncOnlyMismatches ? "mismatches" : "all",
+    mismatchSkuCount: mismatchSkuSet.size,
     stockSkuCount: stockBySku.size,
     syncedSkuCount: stockBySkuToSync.size,
     requestedSkuCount: requestedSkuSet.size || null,

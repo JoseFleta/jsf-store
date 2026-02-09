@@ -6,7 +6,10 @@ type IntegrationRow = {
   woo_key: string | null;
   woo_secret: string | null;
   etsy_bearer: string | null;
+  etsy_refresh_token: string | null;
+  etsy_token_expires_at: string | null;
   etsy_keystring: string | null;
+  etsy_shop_name: string | null;
   etsy_skumap_json: Record<string, { listing_id?: string }> | null;
 };
 
@@ -25,19 +28,28 @@ type ProductImageRow = {
   storage_path: string;
 };
 
+type MovementRow = {
+  product_id: string;
+  movement_type: "purchase" | "sale";
+  quantity: number;
+  qty_change?: number | null;
+};
+
 type WooProduct = {
   id: number;
   sku?: string | null;
   regular_price?: string | null;
   price?: string | null;
   status?: string | null;
+  stock_quantity?: number | null;
+  stock_status?: string | null;
   images?: Array<{ src?: string | null }>;
 };
 
 type EtsyInventoryResponse = {
   products?: Array<{
     sku?: string[] | string | null;
-    offerings?: Array<{ price?: unknown }>;
+    offerings?: Array<{ price?: unknown; quantity?: unknown }>;
   }>;
 };
 
@@ -45,8 +57,22 @@ type EtsyImagesResponse = {
   results?: Array<{ rank?: number | string | null }>;
 };
 
+type EtsyRefreshResponse = {
+  access_token: string;
+  refresh_token?: string;
+  expires_in?: number;
+};
+
 function normalizeSku(value: string | null | undefined): string {
   return (value || "").trim().toUpperCase();
+}
+
+function safeJsonParse<T>(raw: string, fallback: T): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
 }
 
 function pick(...values: Array<string | null | undefined>): string {
@@ -81,9 +107,124 @@ function normalizePrice(value: unknown): number | null {
   return null;
 }
 
+function normalizeInteger(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.round(value);
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return Math.round(parsed);
+  }
+  return null;
+}
+
 async function parseError(res: Response): Promise<string> {
   const text = await res.text();
-  return text ? `${res.status} ${text}` : `${res.status} ${res.statusText}`;
+  if (!text) return `${res.status} ${res.statusText}`;
+  const parsed = safeJsonParse<Record<string, unknown> | string>(text, text);
+  if (typeof parsed === "string") return `${res.status} ${parsed}`;
+  const msg =
+    (typeof parsed.message === "string" && parsed.message) ||
+    (typeof parsed.error_description === "string" && parsed.error_description) ||
+    (typeof parsed.error === "string" && parsed.error) ||
+    text;
+  return `${res.status} ${msg}`;
+}
+
+function formatUnknownError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+
+  const parts: string[] = [];
+  if (error.message) parts.push(error.message);
+
+  const cause = (error as Error & { cause?: unknown }).cause;
+  if (cause && typeof cause === "object") {
+    const causeObj = cause as { code?: unknown; errno?: unknown; message?: unknown };
+    const causeBits: string[] = [];
+    if (typeof causeObj.code === "string" && causeObj.code.trim()) causeBits.push(causeObj.code.trim());
+    if (typeof causeObj.errno === "number") causeBits.push(`errno ${causeObj.errno}`);
+    if (typeof causeObj.message === "string" && causeObj.message.trim()) causeBits.push(causeObj.message.trim());
+    if (causeBits.length > 0) parts.push(causeBits.join(" | "));
+  } else if (typeof cause === "string" && cause.trim()) {
+    parts.push(cause.trim());
+  }
+
+  return parts.filter(Boolean).join(" :: ") || "Unknown error";
+}
+
+function isDnsLookupError(error: unknown): boolean {
+  const normalized = formatUnknownError(error).toLowerCase();
+  return normalized.includes("enotfound") || normalized.includes("eai_again") || normalized.includes("getaddrinfo");
+}
+
+function toggleWwwHost(rawUrl: string): string | null {
+  try {
+    const url = new URL(rawUrl);
+    if (url.hostname.toLowerCase().startsWith("www.")) {
+      url.hostname = url.hostname.slice(4);
+      return url.toString();
+    }
+    url.hostname = `www.${url.hostname}`;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+async function fetchWooWithFallback(url: string): Promise<Response> {
+  try {
+    return await fetch(url, { method: "GET", cache: "no-store" });
+  } catch (primaryError) {
+    if (!isDnsLookupError(primaryError)) throw primaryError;
+    const fallbackUrl = toggleWwwHost(url);
+    if (!fallbackUrl) throw primaryError;
+    try {
+      return await fetch(fallbackUrl, { method: "GET", cache: "no-store" });
+    } catch (fallbackError) {
+      throw new Error(`DNS resolution failed for Woo URL (${formatUnknownError(primaryError)}; fallback failed: ${formatUnknownError(fallbackError)})`);
+    }
+  }
+}
+
+function isEtsyInvalidTokenError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return normalized.includes("401") && normalized.includes("invalid_token");
+}
+
+async function refreshEtsyAccessToken(refreshToken: string, apiKey: string): Promise<EtsyRefreshResponse> {
+  const body = new URLSearchParams();
+  body.set("grant_type", "refresh_token");
+  body.set("client_id", apiKey);
+  body.set("refresh_token", refreshToken);
+
+  const res = await fetch("https://api.etsy.com/v3/public/oauth/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  if (!res.ok) throw new Error(`Etsy token refresh failed: ${await parseError(res)}`);
+  const payload = (await res.json()) as EtsyRefreshResponse;
+  if (!payload.access_token) throw new Error("Etsy token refresh failed: access_token missing in response.");
+  return payload;
+}
+
+async function persistEtsyToken(
+  supabaseAdmin: ReturnType<typeof createClient>,
+  storeId: string,
+  bearer: string,
+  refreshToken: string,
+  tokenExpiresAt: string | null,
+) {
+  await supabaseAdmin
+    .from("store_integrations")
+    .upsert(
+      {
+        store_id: storeId,
+        etsy_bearer: bearer,
+        etsy_refresh_token: refreshToken,
+        etsy_token_expires_at: tokenExpiresAt,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "store_id" },
+    );
 }
 
 function buildWooUrl(baseUrl: string, key: string, secret: string, path: string, q?: Record<string, string>): string {
@@ -97,18 +238,12 @@ function buildWooUrl(baseUrl: string, key: string, secret: string, path: string,
 }
 
 async function findWooBySku(baseUrl: string, key: string, secret: string, sku: string): Promise<WooProduct[]> {
-  const res = await fetch(buildWooUrl(baseUrl, key, secret, "/products", { sku, per_page: "100" }), {
-    method: "GET",
-    cache: "no-store",
-  });
+  const res = await fetchWooWithFallback(buildWooUrl(baseUrl, key, secret, "/products", { sku, per_page: "100", status: "any" }));
   if (!res.ok) throw new Error(`Woo lookup failed for ${sku}: ${await parseError(res)}`);
   const rows = ((await res.json()) as WooProduct[]).filter((row) => normalizeSku(row.sku) === sku);
   if (rows.length > 0) return rows;
 
-  const res2 = await fetch(buildWooUrl(baseUrl, key, secret, "/products", { search: sku, per_page: "100" }), {
-    method: "GET",
-    cache: "no-store",
-  });
+  const res2 = await fetchWooWithFallback(buildWooUrl(baseUrl, key, secret, "/products", { search: sku, per_page: "100", status: "any" }));
   if (!res2.ok) throw new Error(`Woo search failed for ${sku}: ${await parseError(res2)}`);
   return ((await res2.json()) as WooProduct[]).filter((row) => normalizeSku(row.sku) === sku);
 }
@@ -163,21 +298,26 @@ export async function POST(req: Request) {
 
   let imagesQuery = supabaseAdmin.from("product_images").select("product_id,storage_path").eq("store_id", storeId);
   if (productIds.length > 0) imagesQuery = imagesQuery.in("product_id", productIds);
+  let movementsQuery = supabaseAdmin.from("stock_movements").select("product_id,movement_type,quantity,qty_change").eq("store_id", storeId);
+  if (productIds.length > 0) movementsQuery = movementsQuery.in("product_id", productIds);
 
-  const [productsRes, imagesRes, integrationRes] = await Promise.all([
+  const [productsRes, imagesRes, movementsRes, integrationRes] = await Promise.all([
     productsQuery,
     imagesQuery,
+    movementsQuery,
     supabaseAdmin
       .from("store_integrations")
-      .select("woo_url,woo_key,woo_secret,etsy_bearer,etsy_keystring,etsy_skumap_json")
+      .select("woo_url,woo_key,woo_secret,etsy_bearer,etsy_refresh_token,etsy_token_expires_at,etsy_keystring,etsy_shop_name,etsy_skumap_json")
       .eq("store_id", storeId)
       .maybeSingle(),
   ]);
   if (productsRes.error) return NextResponse.json({ error: productsRes.error.message }, { status: 400 });
   if (imagesRes.error) return NextResponse.json({ error: imagesRes.error.message }, { status: 400 });
+  if (movementsRes.error) return NextResponse.json({ error: movementsRes.error.message }, { status: 400 });
 
   const products = (productsRes.data ?? []) as ProductRow[];
   const images = (imagesRes.data ?? []) as ProductImageRow[];
+  const movements = (movementsRes.data ?? []) as MovementRow[];
   const integration = (integrationRes.data ?? null) as IntegrationRow | null;
 
   const wooUrl = pick(integration?.woo_url, process.env.WOO_URL);
@@ -185,8 +325,11 @@ export async function POST(req: Request) {
   const wooSecret = pick(integration?.woo_secret, process.env.WOO_SECRET);
   const wooEnabled = Boolean(wooUrl && wooKey && wooSecret);
 
-  const etsyBearer = pick(integration?.etsy_bearer, process.env.ETSY_BEARER);
+  let etsyBearer = pick(integration?.etsy_bearer, process.env.ETSY_BEARER);
+  let etsyRefreshToken = pick(integration?.etsy_refresh_token, process.env.ETSY_REFRESH_TOKEN);
+  let etsyTokenExpiresAt = pick(integration?.etsy_token_expires_at, process.env.ETSY_TOKEN_EXPIRES_AT) || null;
   const etsyApiKey = pick(integration?.etsy_keystring, process.env.ETSY_KEYSTRING);
+  const etsyShopName = pick(integration?.etsy_shop_name, process.env.ETSY_SHOP_NAME);
   const etsyMap = new Map<string, string>();
   for (const [mapSku, entry] of Object.entries(integration?.etsy_skumap_json || {})) {
     const normalized = normalizeSku(mapSku);
@@ -195,19 +338,165 @@ export async function POST(req: Request) {
   }
   const etsyEnabled = Boolean(etsyBearer && etsyApiKey);
 
+  if (etsyEnabled && etsyRefreshToken && etsyTokenExpiresAt) {
+    const expiresAtMs = Date.parse(etsyTokenExpiresAt);
+    if (Number.isFinite(expiresAtMs) && expiresAtMs - Date.now() < 60_000) {
+      try {
+        const refreshed = await refreshEtsyAccessToken(etsyRefreshToken, etsyApiKey);
+        etsyBearer = refreshed.access_token;
+        if (refreshed.refresh_token) etsyRefreshToken = refreshed.refresh_token;
+        if (refreshed.expires_in && Number.isFinite(refreshed.expires_in)) {
+          etsyTokenExpiresAt = new Date(Date.now() + refreshed.expires_in * 1000).toISOString();
+        }
+        await persistEtsyToken(supabaseAdmin, storeId, etsyBearer, etsyRefreshToken, etsyTokenExpiresAt);
+      } catch {
+        // best effort; request-level retry will try refresh again if a 401 invalid token is returned.
+      }
+    }
+  }
+
   const imageCountByProductId: Record<string, number> = {};
   for (const image of images) imageCountByProductId[image.product_id] = (imageCountByProductId[image.product_id] || 0) + 1;
+  const localStockByProductId: Record<string, number> = {};
+  for (const movement of movements) {
+    const signedQty =
+      typeof movement.qty_change === "number"
+        ? movement.qty_change
+        : movement.movement_type === "purchase"
+        ? Number(movement.quantity || 0)
+        : -Number(movement.quantity || 0);
+    localStockByProductId[movement.product_id] = (localStockByProductId[movement.product_id] || 0) + signedQty;
+  }
+
+  const fetchEtsyJsonWithAutoRefresh = async <T>(url: string, errorLabel: string): Promise<T> => {
+    const doFetch = async (): Promise<Response> =>
+      fetch(url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${etsyBearer}`, "x-api-key": etsyApiKey },
+        cache: "no-store",
+      });
+
+    let res = await doFetch();
+    if (res.ok) return (await res.json()) as T;
+
+    const firstError = await parseError(res);
+    if (isEtsyInvalidTokenError(firstError) && etsyRefreshToken) {
+      const refreshed = await refreshEtsyAccessToken(etsyRefreshToken, etsyApiKey);
+      etsyBearer = refreshed.access_token;
+      if (refreshed.refresh_token) etsyRefreshToken = refreshed.refresh_token;
+      if (refreshed.expires_in && Number.isFinite(refreshed.expires_in)) {
+        etsyTokenExpiresAt = new Date(Date.now() + refreshed.expires_in * 1000).toISOString();
+      }
+      await persistEtsyToken(supabaseAdmin, storeId, etsyBearer, etsyRefreshToken, etsyTokenExpiresAt);
+
+      res = await doFetch();
+      if (res.ok) return (await res.json()) as T;
+      throw new Error(`${errorLabel}: ${await parseError(res)}`);
+    }
+
+    throw new Error(`${errorLabel}: ${firstError}`);
+  };
+
+  let mappingDiscoveryError: string | null = null;
+
+  const discoverEtsyMappingsForMissingSkus = async (missingSkus: Set<string>): Promise<void> => {
+    if (!etsyEnabled || missingSkus.size === 0 || !etsyShopName) return;
+
+    const resolveShopId = async (): Promise<number> => {
+      if (/^\d+$/.test(etsyShopName)) return Number(etsyShopName);
+      const lookup = await fetchEtsyJsonWithAutoRefresh<{ results?: Array<{ shop_id?: number }> }>(
+        `https://openapi.etsy.com/v3/application/shops?shop_name=${encodeURIComponent(etsyShopName)}`,
+        `Etsy shop lookup failed (${etsyShopName})`,
+      );
+      const shopId = lookup.results?.[0]?.shop_id;
+      if (!shopId) throw new Error(`Etsy shop lookup failed for ${etsyShopName}`);
+      return shopId;
+    };
+
+    const shopId = await resolveShopId();
+    const pageSize = 100;
+    const states = ["active", "inactive", "draft", "sold_out", "expired"];
+    const listingIds = new Set<string>();
+
+    for (const state of states) {
+      for (let offset = 0; offset < 5000; offset += pageSize) {
+        let rows: Array<{ listing_id?: number }> = [];
+        try {
+          const payload = await fetchEtsyJsonWithAutoRefresh<{ results?: Array<{ listing_id?: number }> }>(
+            `https://openapi.etsy.com/v3/application/shops/${shopId}/listings/${state}?limit=${pageSize}&offset=${offset}`,
+            `Etsy listings fetch failed (${state})`,
+          );
+          rows = payload.results || [];
+        } catch {
+          const payload = await fetchEtsyJsonWithAutoRefresh<{ results?: Array<{ listing_id?: number }> }>(
+            `https://openapi.etsy.com/v3/application/shops/${shopId}/listings?state=${state}&limit=${pageSize}&offset=${offset}`,
+            `Etsy listings fetch failed (${state})`,
+          );
+          rows = payload.results || [];
+        }
+
+        for (const row of rows) {
+          if (row.listing_id) listingIds.add(String(row.listing_id));
+        }
+        if (rows.length < pageSize) break;
+      }
+    }
+
+    const discovered = new Map<string, string>();
+    for (const listingId of listingIds) {
+      if (discovered.size >= missingSkus.size) break;
+      const inventory = await fetchEtsyJsonWithAutoRefresh<EtsyInventoryResponse>(
+        `https://openapi.etsy.com/v3/application/listings/${listingId}/inventory`,
+        `Etsy inventory fetch failed for ${listingId}`,
+      );
+      for (const variant of inventory.products || []) {
+        for (const variantSku of extractSkus(variant.sku)) {
+          const normalized = normalizeSku(variantSku);
+          if (missingSkus.has(normalized) && !discovered.has(normalized)) {
+            discovered.set(normalized, listingId);
+          }
+        }
+      }
+    }
+
+    if (discovered.size === 0) return;
+
+    for (const [sku, listingId] of discovered.entries()) {
+      etsyMap.set(sku, listingId);
+    }
+    const mergedMapObject = Object.fromEntries(Array.from(etsyMap.entries()).map(([sku, listingId]) => [sku, { listing_id: listingId }]));
+    await supabaseAdmin
+      .from("store_integrations")
+      .upsert({ store_id: storeId, etsy_skumap_json: mergedMapObject, updated_at: new Date().toISOString() }, { onConflict: "store_id" });
+  };
+
+  if (etsyEnabled && etsyShopName) {
+    const missingSkus = new Set<string>();
+    for (const product of products) {
+      const sku = normalizeSku(product.sku);
+      if (sku && !etsyMap.has(sku)) missingSkus.add(sku);
+    }
+    if (missingSkus.size > 0) {
+      try {
+        await discoverEtsyMappingsForMissingSkus(missingSkus);
+      } catch (error) {
+        mappingDiscoveryError = `Etsy mapping auto-discovery failed: ${formatUnknownError(error)}`;
+      }
+    }
+  }
 
   const nowIso = new Date().toISOString();
   const fingerprintRows: Array<Record<string, unknown>> = [];
   const snapshotRows: Array<Record<string, unknown>> = [];
   const warningRows: Array<Record<string, unknown>> = [];
   const firstErrors: string[] = [];
+  if (mappingDiscoveryError) firstErrors.push(mappingDiscoveryError);
 
   for (const product of products) {
     const sku = normalizeSku(product.sku);
     if (!sku) continue;
     const localImageCount = imageCountByProductId[product.id] || 0;
+    const localStockQty = localStockByProductId[product.id] || 0;
     const localFp = localFingerprint(product, localImageCount);
     const localWooPrice = normalizePrice(product.woo_price) ?? normalizePrice(product.base_price);
     const localEtsyPrice = normalizePrice(product.etsy_price) ?? normalizePrice(product.base_price);
@@ -263,9 +552,12 @@ export async function POST(req: Request) {
         } else {
           const woo = rows[0];
           const remotePrice = normalizePrice(woo.regular_price) ?? normalizePrice(woo.price);
+          const remoteStockQty =
+            normalizeInteger(woo.stock_quantity) ?? (woo.stock_status?.toLowerCase() === "outofstock" ? 0 : null);
           const remoteImageCount = Array.isArray(woo.images) ? woo.images.length : 0;
           const priceMismatch = localWooPrice !== remotePrice;
           const photoMismatch = localImageCount !== remoteImageCount;
+          const stockMismatch = remoteStockQty != null && remoteStockQty !== localStockQty;
           if (priceMismatch) {
             warningRows.push({
               store_id: storeId,
@@ -298,6 +590,22 @@ export async function POST(req: Request) {
               last_seen_at: nowIso,
             });
           }
+          if (stockMismatch) {
+            warningRows.push({
+              store_id: storeId,
+              product_id: product.id,
+              sku,
+              channel: "woocommerce",
+              warning_type: "stock_mismatch",
+              severity: "warning",
+              message: "Stock mismatch between local catalog and WooCommerce.",
+              local_value: { stock_qty: localStockQty },
+              remote_value: { stock_qty: remoteStockQty },
+              is_resolved: false,
+              first_seen_at: nowIso,
+              last_seen_at: nowIso,
+            });
+          }
           snapshotRows.push({
             store_id: storeId,
             product_id: product.id,
@@ -308,18 +616,20 @@ export async function POST(req: Request) {
             status: woo.status || null,
             currency: null,
             price: remotePrice,
-            stock_qty: null,
-            remote_payload_fingerprint: hashText(JSON.stringify({ price: remotePrice, image_count: remoteImageCount, status: woo.status || null })),
+            stock_qty: remoteStockQty,
+            remote_payload_fingerprint: hashText(
+              JSON.stringify({ price: remotePrice, stock_qty: remoteStockQty, image_count: remoteImageCount, status: woo.status || null }),
+            ),
             last_local_payload_fingerprint: localFp,
-            sync_state: priceMismatch || photoMismatch ? "needs_publish" : "published",
+            sync_state: priceMismatch || photoMismatch || stockMismatch ? "needs_publish" : "published",
             last_error: null,
-            last_published_at: priceMismatch || photoMismatch ? null : nowIso,
+            last_published_at: priceMismatch || photoMismatch || stockMismatch ? null : nowIso,
             updated_at: nowIso,
             raw_json: woo,
           });
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Woo fetch failed.";
+        const message = `Woo fetch failed for SKU ${sku}: ${formatUnknownError(error)}`;
         if (firstErrors.length < 5) firstErrors.push(message);
         snapshotRows.push({
           store_id: storeId,
@@ -372,7 +682,7 @@ export async function POST(req: Request) {
           channel: "etsy",
           warning_type: "missing_mapping",
           severity: "warning",
-          message: "Missing Etsy listing mapping for this SKU.",
+          message: "Not published in Etsy yet for this SKU.",
           local_value: { sku },
           remote_value: {},
           is_resolved: false,
@@ -381,45 +691,45 @@ export async function POST(req: Request) {
         });
       } else {
         try {
-          const [listingRes, inventoryRes, imagesResRemote] = await Promise.all([
-            fetch(`https://openapi.etsy.com/v3/application/listings/${listingId}`, {
-              method: "GET",
-              headers: { Authorization: `Bearer ${etsyBearer}`, "x-api-key": etsyApiKey },
-              cache: "no-store",
-            }),
-            fetch(`https://openapi.etsy.com/v3/application/listings/${listingId}/inventory`, {
-              method: "GET",
-              headers: { Authorization: `Bearer ${etsyBearer}`, "x-api-key": etsyApiKey },
-              cache: "no-store",
-            }),
-            fetch(`https://openapi.etsy.com/v3/application/listings/${listingId}/images`, {
-              method: "GET",
-              headers: { Authorization: `Bearer ${etsyBearer}`, "x-api-key": etsyApiKey },
-              cache: "no-store",
-            }),
-          ]);
-          if (!listingRes.ok) throw new Error(`Etsy listing fetch failed for ${listingId}: ${await parseError(listingRes)}`);
-          if (!inventoryRes.ok) throw new Error(`Etsy inventory fetch failed for ${listingId}: ${await parseError(inventoryRes)}`);
-          if (!imagesResRemote.ok) throw new Error(`Etsy images fetch failed for ${listingId}: ${await parseError(imagesResRemote)}`);
-
-          const listing = (await listingRes.json()) as { title?: string; state?: string };
-          const inventory = (await inventoryRes.json()) as EtsyInventoryResponse;
-          const etsyImages = (await imagesResRemote.json()) as EtsyImagesResponse;
+          const listing = await fetchEtsyJsonWithAutoRefresh<{ title?: string; state?: string }>(
+            `https://openapi.etsy.com/v3/application/listings/${listingId}`,
+            `Etsy listing fetch failed for ${listingId}`,
+          );
+          const inventory = await fetchEtsyJsonWithAutoRefresh<EtsyInventoryResponse>(
+            `https://openapi.etsy.com/v3/application/listings/${listingId}/inventory`,
+            `Etsy inventory fetch failed for ${listingId}`,
+          );
+          const etsyImages = await fetchEtsyJsonWithAutoRefresh<EtsyImagesResponse>(
+            `https://openapi.etsy.com/v3/application/listings/${listingId}/images`,
+            `Etsy images fetch failed for ${listingId}`,
+          );
           const sortedImages = Array.isArray(etsyImages.results) ? etsyImages.results.sort((a, b) => Number(a.rank || 0) - Number(b.rank || 0)) : [];
           const remoteImageCount = sortedImages.length;
           let remotePrice: number | null = null;
+          let remoteStockQty: number | null = null;
           for (const variant of inventory.products || []) {
             const skus = extractSkus(variant.sku);
             if (skus.length > 0 && !skus.includes(sku)) continue;
+            let variantStock = 0;
+            let hasVariantStockValue = false;
             for (const offering of variant.offerings || []) {
               remotePrice = normalizePrice(offering.price);
+              const offeringQty = normalizeInteger(offering.quantity);
+              if (offeringQty != null) {
+                variantStock += offeringQty;
+                hasVariantStockValue = true;
+              }
               if (remotePrice != null) break;
             }
+            if (hasVariantStockValue) remoteStockQty = variantStock;
             if (remotePrice != null) break;
           }
 
           const priceMismatch = localEtsyPrice !== remotePrice;
           const photoMismatch = localImageCount !== remoteImageCount;
+          const etsyState = (listing.state || "").trim().toLowerCase();
+          const isEtsyNonActiveWithNoLocalStock = localStockQty <= 0 && etsyState.length > 0 && etsyState !== "active";
+          const stockMismatch = remoteStockQty != null && remoteStockQty !== localStockQty && !isEtsyNonActiveWithNoLocalStock;
           if (priceMismatch) {
             warningRows.push({
               store_id: storeId,
@@ -452,6 +762,22 @@ export async function POST(req: Request) {
               last_seen_at: nowIso,
             });
           }
+          if (stockMismatch) {
+            warningRows.push({
+              store_id: storeId,
+              product_id: product.id,
+              sku,
+              channel: "etsy",
+              warning_type: "stock_mismatch",
+              severity: "warning",
+              message: "Stock mismatch between local catalog and Etsy.",
+              local_value: { stock_qty: localStockQty },
+              remote_value: { stock_qty: remoteStockQty },
+              is_resolved: false,
+              first_seen_at: nowIso,
+              last_seen_at: nowIso,
+            });
+          }
           snapshotRows.push({
             store_id: storeId,
             product_id: product.id,
@@ -462,17 +788,19 @@ export async function POST(req: Request) {
             status: listing.state || null,
             currency: "USD",
             price: remotePrice,
-            stock_qty: null,
-            remote_payload_fingerprint: hashText(JSON.stringify({ price: remotePrice, image_count: remoteImageCount, status: listing.state || null })),
+            stock_qty: remoteStockQty,
+            remote_payload_fingerprint: hashText(
+              JSON.stringify({ price: remotePrice, stock_qty: remoteStockQty, image_count: remoteImageCount, status: listing.state || null }),
+            ),
             last_local_payload_fingerprint: localFp,
-            sync_state: priceMismatch || photoMismatch ? "needs_publish" : "published",
+            sync_state: priceMismatch || photoMismatch || stockMismatch ? "needs_publish" : "published",
             last_error: null,
-            last_published_at: priceMismatch || photoMismatch ? null : nowIso,
+            last_published_at: priceMismatch || photoMismatch || stockMismatch ? null : nowIso,
             updated_at: nowIso,
             raw_json: { listing, inventory, images_count: remoteImageCount },
           });
         } catch (error) {
-          const message = error instanceof Error ? error.message : "Etsy fetch failed.";
+          const message = `Etsy fetch failed for listing ${listingId} (SKU ${sku}): ${formatUnknownError(error)}`;
           if (firstErrors.length < 5) firstErrors.push(message);
           snapshotRows.push({
             store_id: storeId,

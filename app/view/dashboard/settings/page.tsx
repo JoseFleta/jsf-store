@@ -351,7 +351,7 @@ export default function SettingsPage() {
     window.localStorage.setItem(ETSY_OAUTH_CODE_VERIFIER_KEY, verifier);
     window.localStorage.setItem(ETSY_OAUTH_REDIRECT_URI_KEY, redirectUri);
 
-    const scope = "shops_r shops_w listings_r listings_w";
+    const scope = "shops_r shops_w listings_r listings_w transactions_r";
     const authorizeUrl = new URL("https://www.etsy.com/oauth/connect");
     authorizeUrl.searchParams.set("response_type", "code");
     authorizeUrl.searchParams.set("client_id", clientId);
