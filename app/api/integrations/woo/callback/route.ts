@@ -73,7 +73,7 @@ export async function POST(req: Request) {
       woo_key: consumerKey,
       woo_secret: consumerSecret,
       updated_at: new Date().toISOString(),
-    },
+    } as any,
     { onConflict: "store_id" },
   );
 

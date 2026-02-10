@@ -309,7 +309,7 @@ async function fetchEtsyListingImageUrls(config: ResolvedEtsyConfig, listingId: 
 }
 
 async function saveRefreshedEtsyToken(
-  supabaseAdmin: ReturnType<typeof createClient>,
+  supabaseAdmin: any,
   storeId: string,
   config: ResolvedEtsyConfig,
 ) {
@@ -322,13 +322,13 @@ async function saveRefreshedEtsyToken(
         etsy_refresh_token: config.refreshToken,
         etsy_token_expires_at: config.tokenExpiresAt,
         updated_at: new Date().toISOString(),
-      },
+      } as any,
       { onConflict: "store_id" },
     );
 }
 
 async function maybeRefreshEtsyToken(
-  supabaseAdmin: ReturnType<typeof createClient>,
+  supabaseAdmin: any,
   storeId: string,
   config: ResolvedEtsyConfig,
 ): Promise<void> {
@@ -347,7 +347,7 @@ async function maybeRefreshEtsyToken(
 }
 
 async function fetchEtsyListingImageUrlsWithRefresh(
-  supabaseAdmin: ReturnType<typeof createClient>,
+  supabaseAdmin: any,
   storeId: string,
   config: ResolvedEtsyConfig,
   listingId: string,

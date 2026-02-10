@@ -737,7 +737,7 @@ export async function POST(req: Request) {
             etsy_refresh_token: etsyConfig.refreshToken || null,
             etsy_token_expires_at: etsyConfig.tokenExpiresAt,
             updated_at: new Date().toISOString(),
-          },
+          } as any,
           { onConflict: "store_id" },
         );
     }

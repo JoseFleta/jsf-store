@@ -108,7 +108,7 @@ export async function POST(req: Request) {
       etsy_token_expires_at: expiresAt,
       etsy_keystring: etsyKeystring,
       updated_at: new Date().toISOString(),
-    },
+    } as any,
     { onConflict: "store_id" },
   );
   if (saveErr) return NextResponse.json({ error: saveErr.message }, { status: 400 });

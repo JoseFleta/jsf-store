@@ -12,9 +12,29 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+function resolveAppUrl(): string {
+  const configured = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_BASE_URL || "").trim();
+  if (!configured) return "http://localhost:3000";
+  try {
+    return new URL(configured).toString().replace(/\/$/, "");
+  } catch {
+    return "http://localhost:3000";
+  }
+}
+
+const appUrl = resolveAppUrl();
+
 export const metadata: Metadata = {
+  metadataBase: new URL(appUrl),
   title: "JSF Store",
   description: "Inventory and marketplace management for JSF Store.",
+  openGraph: {
+    title: "JSF Store",
+    description: "Inventory and marketplace management for JSF Store.",
+    url: appUrl,
+    siteName: "JSF Store",
+    type: "website",
+  },
 };
 
 export default function RootLayout({

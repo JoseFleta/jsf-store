@@ -207,7 +207,7 @@ async function refreshEtsyAccessToken(refreshToken: string, apiKey: string): Pro
 }
 
 async function persistEtsyToken(
-  supabaseAdmin: ReturnType<typeof createClient>,
+  supabaseAdmin: any,
   storeId: string,
   bearer: string,
   refreshToken: string,
@@ -222,7 +222,7 @@ async function persistEtsyToken(
         etsy_refresh_token: refreshToken,
         etsy_token_expires_at: tokenExpiresAt,
         updated_at: new Date().toISOString(),
-      },
+      } as any,
       { onConflict: "store_id" },
     );
 }
@@ -467,7 +467,7 @@ export async function POST(req: Request) {
     const mergedMapObject = Object.fromEntries(Array.from(etsyMap.entries()).map(([sku, listingId]) => [sku, { listing_id: listingId }]));
     await supabaseAdmin
       .from("store_integrations")
-      .upsert({ store_id: storeId, etsy_skumap_json: mergedMapObject, updated_at: new Date().toISOString() }, { onConflict: "store_id" });
+      .upsert({ store_id: storeId, etsy_skumap_json: mergedMapObject, updated_at: new Date().toISOString() } as any, { onConflict: "store_id" });
   };
 
   if (etsyEnabled && etsyShopName) {

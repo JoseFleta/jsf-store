@@ -232,7 +232,7 @@ export async function POST(req: Request) {
   const merged = { ...cleanedExisting, ...generatedMap };
   const { error: saveErr } = await supabaseAdmin
     .from("store_integrations")
-    .upsert({ store_id: storeId, etsy_skumap_json: merged, updated_at: new Date().toISOString() }, { onConflict: "store_id" });
+    .upsert({ store_id: storeId, etsy_skumap_json: merged, updated_at: new Date().toISOString() } as any, { onConflict: "store_id" });
   if (saveErr) return NextResponse.json({ error: saveErr.message }, { status: 400 });
 
   return NextResponse.json({

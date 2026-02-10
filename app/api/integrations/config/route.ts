@@ -157,7 +157,7 @@ export async function POST(req: Request) {
     updated_at: new Date().toISOString(),
   };
 
-  const { error } = await auth.supabaseAdmin.from("store_integrations").upsert(payload, { onConflict: "store_id" });
+  const { error } = await auth.supabaseAdmin.from("store_integrations").upsert(payload as any, { onConflict: "store_id" });
   if (error?.message.includes("Could not find the table 'public.store_integrations'")) {
     return NextResponse.json(
       { error: "Missing DB table: public.store_integrations. Run sql/store_integrations.sql in Supabase SQL Editor." },

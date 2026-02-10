@@ -258,7 +258,7 @@ async function fetchWithRetry(
 }
 
 async function downloadProductImageBlobWithRetry(
-  supabaseAdmin: ReturnType<typeof createClient>,
+  supabaseAdmin: any,
   storagePath: string,
   retries = 2,
 ): Promise<Blob> {
@@ -288,7 +288,7 @@ function isInvalidTokenMessage(message: string): boolean {
 }
 
 async function discoverEtsyListingIdsForSkus(
-  supabaseAdmin: ReturnType<typeof createClient>,
+  supabaseAdmin: any,
   storeId: string,
   config: ResolvedEtsyConfig,
   shopId: number,
@@ -380,7 +380,7 @@ async function discoverEtsyListingIdsForSkus(
     const mergedJson = Object.fromEntries(Array.from(existing.entries()));
     await supabaseAdmin
       .from("store_integrations")
-      .upsert({ store_id: storeId, etsy_skumap_json: mergedJson, updated_at: new Date().toISOString() }, { onConflict: "store_id" });
+      .upsert({ store_id: storeId, etsy_skumap_json: mergedJson, updated_at: new Date().toISOString() } as any, { onConflict: "store_id" });
   }
 
   return discovered;
@@ -478,7 +478,7 @@ async function refreshEtsyAccessToken(config: ResolvedEtsyConfig): Promise<EtsyR
 }
 
 async function saveRefreshedEtsyToken(
-  supabaseAdmin: ReturnType<typeof createClient>,
+  supabaseAdmin: any,
   storeId: string,
   config: ResolvedEtsyConfig,
 ) {
@@ -491,13 +491,13 @@ async function saveRefreshedEtsyToken(
         etsy_refresh_token: config.refreshToken,
         etsy_token_expires_at: config.tokenExpiresAt,
         updated_at: new Date().toISOString(),
-      },
+      } as any,
       { onConflict: "store_id" },
     );
 }
 
 async function maybeRefreshEtsyToken(
-  supabaseAdmin: ReturnType<typeof createClient>,
+  supabaseAdmin: any,
   storeId: string,
   config: ResolvedEtsyConfig,
 ): Promise<void> {
@@ -564,7 +564,7 @@ async function resolveEtsyShopIdFromListing(config: ResolvedEtsyConfig, listingI
 }
 
 async function withEtsyRefresh<T>(
-  supabaseAdmin: ReturnType<typeof createClient>,
+  supabaseAdmin: any,
   storeId: string,
   config: ResolvedEtsyConfig,
   execute: () => Promise<T>,

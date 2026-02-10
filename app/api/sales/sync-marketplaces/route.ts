@@ -322,7 +322,7 @@ async function saveRefreshedEtsyToken(
         etsy_refresh_token: config.refreshToken || null,
         etsy_token_expires_at: config.tokenExpiresAt,
         updated_at: new Date().toISOString(),
-      },
+      } as any,
       { onConflict: "store_id" },
     );
 }
