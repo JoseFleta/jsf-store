@@ -81,7 +81,7 @@ export async function POST(req: Request) {
   const returnUrl = `${appBaseUrl.origin}/view/dashboard/settings/woo/callback?store=${encodeURIComponent(storeId)}&success=1`;
 
   const authorizeUrl = new URL("/wc-auth/v1/authorize", wooUrl);
-  authorizeUrl.searchParams.set("app_name", "Stock SaaS");
+  authorizeUrl.searchParams.set("app_name", "JSF Store");
   authorizeUrl.searchParams.set("scope", "read_write");
   authorizeUrl.searchParams.set("user_id", sessionId);
   authorizeUrl.searchParams.set("return_url", returnUrl);

@@ -60,7 +60,7 @@ export default function LoginPage() {
       <div className="mx-auto flex max-w-5xl flex-col gap-6 px-6 py-12 lg:flex-row">
         <section className="flex-1 rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
           <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-indigo-700">
-            Stock SaaS
+            JSF Store
           </span>
           <h1 className="mt-4 text-2xl font-semibold text-slate-900">Bienvenido</h1>
           <p className="mt-2 text-sm text-slate-500">
